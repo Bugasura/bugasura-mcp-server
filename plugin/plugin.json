@@ -1,15 +1,15 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "bugasura",
-  "version": "3.3.3",
+  "version": "3.3.4",
   "description": "Bug tracking and test management in Bugasura: issues, test cases, sprints, test runs, requirements, knowledge base and TestPert AI test generation.",
   "author": {
     "name": "Bugasura",
     "email": "support@bugasura.io",
     "url": "https://bugasura.io"
   },
-  "homepage": "https://github.com/appachhi/bugasura-mcp-server#readme",
-  "repository": "https://github.com/appachhi/bugasura-mcp-server",
+  "homepage": "https://github.com/Bugasura/bugasura-mcp-server#readme",
+  "repository": "https://github.com/Bugasura/bugasura-mcp-server",
   "license": "MIT",
   "keywords": ["bug tracking", "test management", "qa", "test cases", "sprints", "issues"],
   "extensions": {
@@ -22,7 +22,7 @@
         "category": "Productivity",
         "capabilities": ["Read", "Write"],
         "websiteURL": "https://bugasura.io",
-        "supportURL": "https://github.com/appachhi/bugasura-mcp-server/issues",
+        "supportURL": "https://github.com/Bugasura/bugasura-mcp-server/issues",
         "privacyPolicyURL": "https://bugasura.io/privacy/",
         "termsOfServiceURL": "https://bugasura.io/terms-of-service/",
         "defaultPrompt": [

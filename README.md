@@ -1644,8 +1644,8 @@ The server passes your requests to the Bugasura API under your own account. It k
 
 - 🌐 [Website](https://bugasura.io)
 - 📧 [support@bugasura.io](mailto:support@bugasura.io)
-- 📚 [Documentation](https://github.com/appachhi/bugasura-mcp-server#readme)
-- 🐞 [Report an issue](https://github.com/appachhi/bugasura-mcp-server/issues)
+- 📚 [Documentation](https://github.com/Bugasura/bugasura-mcp-server#readme)
+- 🐞 [Report an issue](https://github.com/Bugasura/bugasura-mcp-server/issues)
 - 🔒 [Privacy Policy](https://bugasura.io/privacy/)
 - 📄 [Terms of Service](https://bugasura.io/terms-of-service/)
 

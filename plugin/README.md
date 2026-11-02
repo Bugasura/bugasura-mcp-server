@@ -18,7 +18,7 @@ Refer to teams, projects and issues by name or key (such as `ISS09`); the server
 In Claude Code:
 
 ```
-/plugin install bugasura --marketplace appachhi/bugasura-mcp-server
+/plugin install bugasura --marketplace Bugasura/bugasura-mcp-server
 ```
 
 You need a Bugasura account. The first time a Bugasura tool runs, your assistant opens the Bugasura sign-in page in your browser. Sign in, click **Allow**, and you're connected. There's no API key to copy, and the assistant never sees your password or tokens.
@@ -33,6 +33,6 @@ The server passes your requests to the Bugasura API under your own account. It k
 
 ## Support
 
-- Documentation: <https://github.com/appachhi/bugasura-mcp-server#readme>
-- Issues: <https://github.com/appachhi/bugasura-mcp-server/issues>
+- Documentation: <https://github.com/Bugasura/bugasura-mcp-server#readme>
+- Issues: <https://github.com/Bugasura/bugasura-mcp-server/issues>
 - Email: [support@bugasura.io](mailto:support@bugasura.io)
