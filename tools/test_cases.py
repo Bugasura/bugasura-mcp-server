@@ -186,7 +186,7 @@ async def list_test_cases(
 @mcp.tool(
     name = "bugasura_create_test_case",
     title = "Create Test Case",
-    description = "Create a new test case with required scenario. Supports feature tags, testing type, severity, priority, conditions, test data, assignees, and folder organization. Interactive team/project selection available.",
+    description = "Create a new test case with required scenario. Supports feature tags, testing type, severity, priority, conditions, test data, test steps, assignees, and folder organization. Interactive team/project selection available.",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
 async def create_test_case(
@@ -203,6 +203,7 @@ async def create_test_case(
     test_data: str | list[dict[str, Any]] = Field(default="", description="Test data (optional). Plain text, or for TestPert / agent test cases the JSON list they store: {type: 'text' or 'file', key, value, test_data_id} items (a list or its JSON string). Replaces the whole value."),
     platform_type: Optional[TestCasePlatformType] = Field(default=None, description="Platform the test case runs on (optional). Agents are platform bound: the Browser Agent runs only DESKTOP_WEB test cases, the Mobile Agent only ANDROID / ANDROID_MOBILE_WEB / IOS / IOS_MOBILE_WEB."),
     acceptance_criteria: str = Field(default="", description="Acceptance criteria or expected results (optional)"),
+    test_steps: str = Field(default="", description="Test steps of a functional test case: one step per line or a JSON list of steps (optional)"),
     assignees: Optional[str] = Field(default=None, description="Comma-separated assignee names, emails, or IDs (optional)"),
     is_api_test_case: bool = Field(default=False, description="Flag for API test cases (default: False)"),
     folder_id: Optional[int] = Field(default=None, description="Folder ID for organization (optional, ge=1)", ge=1),
@@ -235,8 +236,10 @@ async def create_test_case(
         test_idea: What to test/verify
         test_data: Sample data needed for test
         acceptance_criteria: Expected results
+        test_steps: Steps of a functional test case, one per line or a JSON list (optional)
         assignees: Comma-separated names, emails, or user IDs (optional)
-        is_api_test_case: Set to True for API test cases (auto-detected if "API" in scenario/testing_type)
+        is_api_test_case: Set to True for API test cases (auto-detected if "API" in scenario/testing_type,
+                          unless test_steps is given)
         folder_id: Optional folder to organize test cases
 
     Returns:
@@ -262,9 +265,20 @@ async def create_test_case(
 
     # All required parameters provided - proceed with test case creation
 
+    # The API stores api_test_steps in place of test_steps for API test cases, so the steps would be lost
+    test_steps = test_steps.strip()
+    if test_steps and (is_api_test_case or 'api' in testing_type.lower()):
+        return {
+            'status': 'failed',
+            'error': 'test_steps applies to functional test cases only; this is an API test case',
+            'error_type': 'ValidationError',
+            'message': 'Create the test case without test_steps and add its API test steps in Bugasura.',
+        }
+
     # Auto-detect API test case from scenario or testing_type
     # If user mentions "API" in scenario or explicitly sets testing_type to "API", mark as API test case
-    if not is_api_test_case:
+    # Steps mark a functional test case, so a scenario such as "Verify rapid checkout" is not auto-detected
+    if not is_api_test_case and not test_steps:
         scenario_lower = scenario.lower()
         testing_type_lower = testing_type.lower()
         if 'api' in scenario_lower or 'api' in testing_type_lower:
@@ -310,6 +324,7 @@ async def create_test_case(
         'test_data': _test_data_text(test_data),     # Input data needed
         'platform_type': platform_type,              # Platform the agents check
         'acceptance_criteria': acceptance_criteria,  # Expected outcomes
+        'test_steps': test_steps,                    # Raw text: the API splits it and strips "1." / "Step 1:" / bullets
         'is_api_test_case': is_api_test_case        # Flag for API test cases
     }
 
