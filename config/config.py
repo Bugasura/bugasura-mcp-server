@@ -155,7 +155,9 @@ DEFAULT_ALLOWED_REDIRECT_URIS = [
     "windsurf://codeium.windsurf/*",
     # Google Antigravity
     "https://antigravity.google/oauth-callback",
-    # ChatGPT connectors (also what Codex registers through); the last segment is a per-connector ID
+    # ChatGPT connectors and plugins (also what Codex registers through): the stable callback when the
+    # server advertises RFC 9207 iss (we do), else a per-connector ID
+    "https://chatgpt.com/connector_platform_oauth_redirect",
     "https://chatgpt.com/connector/oauth/*",
 ]
 

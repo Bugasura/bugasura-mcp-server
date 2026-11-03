@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "bugasura",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "Bug tracking and test management in Bugasura: issues, test cases, sprints, test runs, requirements, knowledge base and TestPert AI test generation.",
   "author": {
     "name": "Bugasura",
@@ -18,7 +18,7 @@
         "displayName": "Bugasura",
         "shortDescription": "Bug tracking & test management",
         "longDescription": "Work with your Bugasura workspace from chat. Log and update issues, assign and comment on them; write, run and report test cases; plan sprints and test runs; manage requirements and link them to test cases; keep a project knowledge base; and generate test cases from requirements with TestPert. Refer to teams, projects and issues by name or key (such as ISS09); Bugasura resolves them for you. You sign in with your own Bugasura account, and every action runs with your permissions.",
-        "developerName": "Bugasura",
+        "developerName": "Moolya Software Testing Private Limited",
         "category": "Productivity",
         "capabilities": ["Read", "Write"],
         "websiteURL": "https://bugasura.io",

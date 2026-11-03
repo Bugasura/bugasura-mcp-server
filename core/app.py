@@ -30,7 +30,7 @@ from utils.resolvers import resolve_team_identifier
 auth = build_auth_provider()
 
 # Reported by /health and by server/discover (serverInfo.version)
-SERVER_VERSION = "3.4.0"
+SERVER_VERSION = "3.4.1"
 
 # Returned by server/discover; how an assistant should drive the tools.
 SERVER_INSTRUCTIONS = """\
