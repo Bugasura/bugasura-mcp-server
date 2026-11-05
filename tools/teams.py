@@ -776,7 +776,7 @@ async def add_team_members(
     name="bugasura_update_team_member",
     title="Update Team Member",
     description="Update team member permissions (admin/member role). Supports team_id or team_name. Only team admins can change user roles.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_team_member(
     user_id: int = Field(description="User ID to update (the team member whose role to change)"),

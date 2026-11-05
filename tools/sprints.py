@@ -243,7 +243,7 @@ async def create_sprint(
     name = "bugasura_update_sprint",
     title = "Update Sprint",
     description = "Update sprint details (partial updates supported). Can update name, dates, duration, or status. Interactive team/project selection available.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_sprint(
     sprint_id: int = Field(description="Sprint identifier", ge=1),

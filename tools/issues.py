@@ -460,7 +460,7 @@ async def get_issue(
     name = "bugasura_update_issue",
     title = "Update Issue",
     description = "Update an existing issue (partial updates supported). Can update any field including summary, description, severity, status, tags, assignees, environment, and custom fields. Interactive selection available.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_issue(
     issue_id: IdOrName = Field(description="Issue id or key, e.g. 107294 or 'JUS3' (to update)"),

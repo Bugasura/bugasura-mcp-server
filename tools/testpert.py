@@ -311,7 +311,7 @@ async def create_testpert_sprint(
                 "brand-new ones with bugasura_create_requirement "
                 f"(sprint_id={result.get('report_id')}, team_id={context['team_id']}, "
                 f"project_id={context['project_id']}). Once at least one requirement is on the sprint, "
-                f"call bugasura_testpert_start_skip_testplan(sprint_id={result.get('report_id')}, "
+                f"call bugasura_testpert_start_from_requirements(sprint_id={result.get('report_id')}, "
                 f"testrun_id={result.get('testrun_id')}) to build the test plan. Do NOT call "
                 "bugasura_testpert_upload_kb / generate_sprint_context for this sprint."
             )
@@ -778,8 +778,8 @@ async def upload_testpert_kb(
 
 # --- Skip-enrich kickoff: requirements -> test plan (no docs, no questions) -----
 @mcp.tool(
-    name = "bugasura_testpert_start_skip_testplan",
-    title = "Start TestPert (Skip Test Plan)",
+    name = "bugasura_testpert_start_from_requirements",
+    title = "Start TestPert from Requirements",
     description = (
         "SKIP-ENRICH sprints ONLY. For a TestPert sprint created with skip_enrich_requirements=1, this drives "
         "the front half of the flow WITHOUT document upload and WITHOUT the deepen/missing/risk questions, using "
@@ -791,7 +791,7 @@ async def upload_testpert_kb(
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 )
-async def start_skip_testplan(
+async def start_from_requirements(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     testrun_id: Optional[int] = Field(default=None, description="The sprint's testrun_id (from the create response); when given, a clickable sprint link is included."),
     max_wait_seconds: int = Field(default=45, description="Upper bound on polling while the test plan is generated (0-45, default 45). Capped at 45s to stay under MCP client timeouts; re-call to keep waiting."),
@@ -812,7 +812,7 @@ async def start_skip_testplan(
         return validation
 
     context = await select_team_project_context(api_key, team_id, project_id,
-                                                'bugasura_testpert_start_skip_testplan')
+                                                'bugasura_testpert_start_from_requirements')
     if 'status' in context and context['status'] == 'selection_required':
         return context
     if not sprint_id:
@@ -924,7 +924,7 @@ async def start_skip_testplan(
     return _attach_sprint_link({
         'status': 'OK', 'current_status': poll['current'], 'reached': False, 'in_progress': True,
         'message': "Building the test plan — " + _working_message(),
-        'next_step': "Call bugasura_testpert_start_skip_testplan again to keep checking.",
+        'next_step': "Call bugasura_testpert_start_from_requirements again to keep checking.",
     }, testrun_id, sprint_id)
 
 
@@ -1338,7 +1338,7 @@ async def delete_testpert_context_question(
         "is a synchronous status flip, no polling needed. Batches that leave some rows undecided just "
         "save and report how many are left. Set advance=False to only save."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": False, "openWorldHint": True}
 )
 async def update_testpert_requirement_contexts(
     updates: List[dict] = Field(description=(
@@ -1612,7 +1612,7 @@ async def get_testpert_testplan(
         "the complete structure from bugasura_testpert_get_testplan for those. Persists the plan "
         "only; does NOT change status (use bugasura_testpert_advance). Requires a team-admin API key."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": False, "openWorldHint": True}
 )
 async def update_testpert_testplan(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
@@ -1932,7 +1932,7 @@ async def generate_testpert_testcases(
         "Maximum 5 attempts per sub-feature. "
         "Re-callable: if still generating when the time budget ends, call again with elapsed_seconds."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": False, "openWorldHint": True}
 )
 async def regenerate_testpert_testcases(
     feature_id: int = Field(description="The sub-feature's feature_id to regenerate (from bugasura_testpert_get_features — the sub-feature row id, not the parent feature id)."),
@@ -2316,7 +2316,7 @@ async def enrich_testpert_requirements(
     otherwise (at RISKS_IN_REQUIREMENTS) it sets GENERATE_ENRICH_REQUIREMENTS then polls. A failed
     enrichment is reported as unrecoverable rather than retried — the status switch only accepts
     GENERATE_ENRICH_REQUIREMENTS from RISKS_IN_REQUIREMENTS and has no REGENERATE_* counterpart.
-    Skip-enrich sprints don't use this (they reach ENRICH_REQUIREMENTS via start_skip_testplan).
+    Skip-enrich sprints don't use this (they reach ENRICH_REQUIREMENTS via start_from_requirements).
     generate_coverage still bundles enrichment, so this tool is an optional, visible front-half of that.
     """
     api_key = get_api_key()
@@ -2347,7 +2347,7 @@ async def enrich_testpert_requirements(
             'error': 'Not used for skip-enrich sprints',
             'error_type': 'ValidationError',
             'message': ("This is a skip-enrich sprint — it reaches the enriched state via the "
-                        "requirements step (bugasura_testpert_start_skip_testplan), not a separate enrich "
+                        "requirements step (bugasura_testpert_start_from_requirements), not a separate enrich "
                         "phase. Continue with bugasura_testpert_generate_coverage."),
             'current_status': current,
         }
@@ -2434,7 +2434,7 @@ async def enrich_testpert_requirements(
         "is only valid from TEST_PLANING, so unless the sprint skips enrichment, this drives it there "
         "first — RISKS_IN_REQUIREMENTS -> GENERATE_ENRICH_REQUIREMENTS -> ENRICH_REQUIREMENTS -> "
         "GENERATE_TEST_PLANING -> TEST_PLANING — one phase at a time, then sets TEST_COVERAGE. For "
-        "skip-enrich sprints, run bugasura_testpert_start_skip_testplan first to reach TEST_PLANING. "
+        "skip-enrich sprints, run bugasura_testpert_start_from_requirements first to reach TEST_PLANING. "
         "Re-callable; if a phase is still running it reports progress and you call again."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
@@ -2614,7 +2614,7 @@ async def generate_testpert_coverage(
                 'status': 'failed', 'error': 'Test plan not ready yet', 'error_type': 'ValidationError',
                 'current_status': current,
                 'message': ("This skip-enrich sprint hasn't reached the test plan yet. Run "
-                            "bugasura_testpert_start_skip_testplan first."),
+                            "bugasura_testpert_start_from_requirements first."),
             }
         return {
             'status': 'failed',
@@ -3282,7 +3282,7 @@ async def get_testpert_sprint_context(
         "without also advancing; the API only accepts this data on the confirm transition. The sprint "
         "must currently be at SPRINT_CONTEXT."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": False, "openWorldHint": True}
 )
 async def confirm_testpert_sprint_context(
     affected_modules: Optional[List[str]] = Field(default=None, description="Replace the affected-modules list with these (omit to keep the engine's list unchanged)."),
@@ -3407,7 +3407,7 @@ async def confirm_testpert_sprint_context(
         "polls until MISSING_REQUIREMENTS. Requires a team-admin API key. "
         "Use this for the DEEPEN questions; use bugasura_testpert_update_requirement_contexts for missing-req / risk edits."
     ),
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": False, "openWorldHint": True}
 )
 async def answer_testpert_context_questions(
     answers: List[dict] = Field(description=(
@@ -3710,7 +3710,7 @@ async def delete_testpert_kb(
         "display `id`. Each is linked via /v1/requirements/sprint/link; already-linked ids are a "
         "harmless no-op. To create "
         "BRAND-NEW requirements instead, use bugasura_create_requirement with this sprint_id. After "
-        "linking, continue the skip flow with bugasura_testpert_start_skip_testplan."
+        "linking, continue the skip flow with bugasura_testpert_start_from_requirements."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 )
@@ -3779,7 +3779,7 @@ async def link_testpert_requirements(
         'message': (f"Linked {linked} of {len(results)} requirement(s) to the sprint."
                     + ("" if overall_ok else " Some couldn't be linked — see results.")),
         'next_step': ("When the requirements are set, build the test plan with "
-                      "bugasura_testpert_start_skip_testplan(sprint_id, testrun_id)."),
+                      "bugasura_testpert_start_from_requirements(sprint_id, testrun_id)."),
     }
 
 

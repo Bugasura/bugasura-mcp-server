@@ -393,7 +393,7 @@ async def create_test_run(
     name = "bugasura_update_test_run",
     title = "Update Test Run",
     description = "Update a test run execution (partial updates). run may be given by name or id; pass report when using a name. Can change name, status, environment, or app build.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_run(
     run: str = Field(description="Test run to update: run name or numeric run id"),
@@ -487,7 +487,7 @@ async def update_test_run(
     name = "bugasura_update_test_run_scheduler",
     title = "Update Test Run Scheduler",
     description = "Edit a test run / scheduler the same way the UI edit-run modal does: rename, change environment / app build, switch single vs scheduled, change frequency / repeat / weekdays / end condition. scheduler / report / environment / app build may be given by name or id.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_run_scheduler(
     scheduler: str = Field(description="Scheduler to edit: scheduler name or numeric id"),

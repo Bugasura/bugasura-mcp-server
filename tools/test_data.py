@@ -614,7 +614,7 @@ async def create_test_data_variable(
     name = "bugasura_update_test_data_variable",
     title = "Update Test Data Variable",
     description = "Update a test data variable (by ID or key) in an environment or the 'Globals' scope: change its value, key, description, or activate/deactivate it. Only the fields you pass change.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_test_data_variable(
     team_id: IdOrName = Field(description="Team id or name (required)"),

@@ -8,6 +8,12 @@ Bugasura MCP Server enables AI tools like Claude, VS Code Copilot, and Cursor to
 
 ---
 
+## ⚠️ Breaking changes in 3.5
+
+| What changed | 3.4 | 3.5 |
+|--------------|-----|-----|
+| Starting a TestPert sprint from its requirements | `bugasura_testpert_start_skip_testplan` | `bugasura_testpert_start_from_requirements`. Same inputs and behaviour; the old name wrongly suggested it skips the test plan, which it builds |
+
 ## ⚠️ Breaking changes in 3.3
 
 | What changed | 3.2 | 3.3 |
@@ -1105,7 +1111,7 @@ TestPert is a paid, project-level AI feature (`is_testpert_enabled` on the proje
 
 **Skip-enrich flow** — use existing project requirements instead of documents
 - `bugasura_testpert_link_requirements` - Link existing project requirements to the sprint as its source
-- `bugasura_testpert_start_skip_testplan` - Build the test plan directly from the sprint's linked requirements
+- `bugasura_testpert_start_from_requirements` - Build the test plan directly from the sprint's linked requirements
 
 **Low-level status driver** (advanced)
 - `bugasura_testpert_advance` - Set a specific status and/or poll until a target status — use this when you need direct control over the pipeline
@@ -1118,13 +1124,13 @@ Normal:  create → upload_kb → generate_sprint_context → [get_kb_validation
 
          * only if generate_sprint_context lands on SPRINT_CONTEXT_USER_VALIDATION instead of SPRINT_CONTEXT
 
-Skip:    create (skip_enrich=true) → link_requirements → start_skip_testplan
+Skip:    create (skip_enrich=true) → link_requirements → start_from_requirements
          → get_testplan → generate_coverage → generate_testcases
 ```
 
 **Notes:**
 - The project must have TestPert enabled (`is_testpert_enabled`). Use `bugasura_create_sprint` for standard sprints.
-- Polling tools (`generate_sprint_context`, `resolve_kb_validation`, `confirm_sprint_context`, `start_skip_testplan`, `enrich_requirements`, `generate_coverage`, `generate_testcases`) are time-bounded per call and re-callable — if the AI phase is still running, call the same tool again to keep checking.
+- Polling tools (`generate_sprint_context`, `resolve_kb_validation`, `confirm_sprint_context`, `start_from_requirements`, `enrich_requirements`, `generate_coverage`, `generate_testcases`) are time-bounded per call and re-callable — if the AI phase is still running, call the same tool again to keep checking.
 - `generate_coverage` drives both the enrichment and test-plan phases itself (`RISKS_IN_REQUIREMENTS → ENRICH_REQUIREMENTS → TEST_PLANING → TEST_COVERAGE`), one phase per call — `enrich_requirements` is only needed if you want that phase visible as its own step.
 - A team-admin API key is required for status transitions and test-plan updates.
 

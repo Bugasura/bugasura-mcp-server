@@ -341,7 +341,7 @@ async def create_project(
     name = "bugasura_update_project",
     title = "Update Project",
     description = "Update project details including name, issue prefix, and visibility settings. Supports project_id or project_name. Team admin privileges may be required.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_project(
     project_id: Optional[int] = Field(default=None, description="Project identifier (provide either project_id or search_project_name, ge=1)", ge=1),

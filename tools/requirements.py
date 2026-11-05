@@ -821,7 +821,7 @@ async def add_requirement_attachments(
     name="bugasura_update_requirement",
     title="Update Requirement",
     description="Update a requirement by ID with partial fields. Can update any field including title, details, severity, priority, tags, status, assignees, type, folder, sprint, overview, and parent requirement. Interactive team/project selection available.",
-    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": True}
+    annotations={"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": True}
 )
 async def update_requirement(
     requirement_id: int = Field(description="Requirement numeric ID to update"),
