@@ -17,9 +17,9 @@
       "interface": {
         "displayName": "Bugasura",
         "shortDescription": "Bug tracking & test management",
-        "longDescription": "Work with your Bugasura workspace from chat. Log and update issues, assign and comment on them; write, run and report test cases; plan sprints and test runs; manage requirements and link them to test cases; keep a project knowledge base; and generate test cases from requirements with TestPert. Refer to teams, projects and issues by name or key (such as ISS09); Bugasura resolves them for you. You sign in with your own Bugasura account, and every action runs with your permissions.",
+        "longDescription": "Bugasura is a bug tracking and test management tool for software and QA teams. This plugin connects your Bugasura workspace to ChatGPT and Codex: log and update bugs, assign and comment on them; write, run and report test cases; plan sprints and test runs; manage requirements and link them to test cases; keep a project knowledge base; and generate test cases from requirements with TestPert. Refer to teams, projects and issues by name or key (such as ISS09); Bugasura resolves them for you. You sign in with your own Bugasura account, and every action runs with your permissions.",
         "developerName": "Moolya Software Testing Private Limited",
-        "category": "Productivity",
+        "category": "Developer Tools",
         "capabilities": ["Read", "Write"],
         "websiteURL": "https://bugasura.io",
         "supportURL": "https://github.com/Bugasura/bugasura-mcp-server/issues",
