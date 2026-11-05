@@ -85,7 +85,7 @@ from utils.output_types import ToolResponse
 from utils.resolvers import IdOrName, select_team_project_context
 from utils.urls import (
     download_url_to_path, download_url_tmp, fetch_url_bytes, infer_filename_from_url_path,
-    normalise_share_url,
+    normalise_share_url, require_fetchable_url,
 )
 
 
@@ -3265,6 +3265,12 @@ async def import_website_to_knowledge_base(
         return _fail('More than one URL provided',
                      'Import one website per call. Call this tool again for each site the user '
                      'wants imported.')
+
+    # The crawler refuses internal addresses too; checking here gives the user the reason right away.
+    try:
+        await asyncio.to_thread(require_fetchable_url, website_url)
+    except ValueError as e:
+        return _fail('Invalid website_url', str(e))
 
     # folderId is required upstream, so resolve (or create) the folder before the import.
     folder = await _resolve_kb_folder(api_key, team_id, project_id, folder_id, folder_name)
