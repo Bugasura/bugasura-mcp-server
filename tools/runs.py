@@ -92,7 +92,7 @@ async def list_test_runs(
     if error:
         return respond(error, response_format)
 
-    params = {'appId': context['project_id'], 'reportId': report_id}
+    params = {'teamId': context['team_id'], 'appId': context['project_id'], 'reportId': report_id}
     if execution_source:
         params['source'] = execution_source
     if search_by_text:
@@ -143,7 +143,7 @@ async def get_test_run_details(
     if error:
         return respond(error, response_format)
 
-    run_id, error = await _resolve_run_or_scheduler(api_key, context['project_id'], report_id, run, 'run')
+    run_id, error = await _resolve_run_or_scheduler(api_key, context['team_id'], context['project_id'], report_id, run, 'run')
     if error:
         return respond(error, response_format)
 
@@ -151,6 +151,7 @@ async def get_test_run_details(
     # a broken API path (getTestrunsDetails) that requires schedulerId alongside it.
     # Filter client-side instead.
     full_resp = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params={
+        'teamId': context['team_id'],
         'appId': context['project_id'],
         'reportId': report_id,
     })
@@ -335,6 +336,7 @@ async def create_test_run(
         return config_error
 
     payload = {
+        "teamId": context['team_id'],
         "appId": context['project_id'],
         "reportId": report_id,
         "name": name,
@@ -397,7 +399,7 @@ async def create_test_run(
 )
 async def update_test_run(
     run: str = Field(description="Test run to update: run name or numeric run id"),
-    report: Optional[str] = Field(default=None, description="Sprint / report (sprint name or id). Required when 'run' is a name so it can be looked up."),
+    report: Optional[str] = Field(default=None, description="Sprint / report (sprint name or id). Required when 'run' is a name so it can be looked up, and when environment changes without execution_config so the saved config can be kept."),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     run_name: Optional[str] = Field(default=None, description="New test run name (1-250 characters, optional)"),
@@ -429,7 +431,7 @@ async def update_test_run(
         report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
         if error:
             return error
-    run_id, error = await _resolve_run_or_scheduler(api_key, context['project_id'], report_id, run, 'run')
+    run_id, error = await _resolve_run_or_scheduler(api_key, context['team_id'], context['project_id'], report_id, run, 'run')
     if error:
         return error
 
@@ -444,7 +446,7 @@ async def update_test_run(
     if config_error:
         return config_error
 
-    payload = {"testRunsExecutionRunId": run_id}
+    payload = {"teamId": context['team_id'], "appId": context['project_id'], "testRunsExecutionRunId": run_id}
     if run_name is not None:
         payload["runName"] = run_name
     if execution_status is not None:
@@ -454,28 +456,40 @@ async def update_test_run(
         # When environment changes without an explicit app build, remove only the
         # appBuild key from the stored executionConfig (mirrors the scheduler path).
         if execution_config_json is None:
-            current_config = {}
-            if report_id is not None:
-                run_list = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params={
-                    'appId': context['project_id'], 'reportId': report_id,
-                })
-                if isinstance(run_list, dict) and run_list.get('status') == 'OK':
-                    current_run = next(
-                        (r for r in (run_list.get('schedulerDetails') or {}).get('test_runs', [])
-                         if str(r.get('run_id', '')) == str(run_id)),
-                        None
-                    )
-                    if current_run:
-                        try:
-                            current_config = json.loads(current_run.get('execution_config') or '{}')
-                        except (ValueError, TypeError):
-                            current_config = {}
+            if report_id is None:
+                return {
+                    'status': 'failed',
+                    'error': "report required to change the environment",
+                    'error_type': 'ValidationError',
+                    'message': "Pass report so the run's saved execution config can be kept when the environment changes"
+                }
+            run_list = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params={
+                'teamId': context['team_id'], 'appId': context['project_id'], 'reportId': report_id,
+            })
+            if not isinstance(run_list, dict) or run_list.get('status') != 'OK':
+                return _fetch_error('test run', run_list if isinstance(run_list, dict) else {})
+            current_run = next(
+                (r for r in (run_list.get('schedulerDetails') or {}).get('test_runs', [])
+                 if str(r.get('run_id', '')) == str(run_id)),
+                None
+            )
+            if current_run is None:
+                return {
+                    'status': 'failed',
+                    'error': f"Test run {run_id} not found in this sprint",
+                    'error_type': 'NotFoundError',
+                    'message': "The run is not in the given sprint, so its saved execution config could not be read"
+                }
+            try:
+                current_config = json.loads(current_run.get('execution_config') or '{}')
+            except (ValueError, TypeError):
+                current_config = {}
             current_config.pop('appBuild', None)
             execution_config_json = json.dumps(current_config)
     if execution_config_json is not None:
         payload["executionConfig"] = execution_config_json
 
-    logger.info(f"Updating test run run_id={run_id} with {len(payload) - 1} field(s)")
+    logger.info(f"Updating test run run_id={run_id} with {len(payload) - 3} field(s)")
     return await make_api_request('POST', '/v1/testrunsExecution/testruns/update', api_key, data=payload)
 
 
@@ -534,7 +548,7 @@ async def update_test_run_scheduler(
     # Fetch the existing scheduler row so we can preserve unchanged fields,
     # exactly like the pre-filled UI edit modal. This avoids the backend's
     # "empty executionMode -> convert recurring to single + create a run" path.
-    row, error = await _get_scheduler_row(api_key, context['project_id'], report_id, scheduler)
+    row, error = await _get_scheduler_row(api_key, context['team_id'], context['project_id'], report_id, scheduler)
     if error:
         return error
     scheduler_id = int(row['testrun_execution_run_schedule_id'])
@@ -545,6 +559,7 @@ async def update_test_run_scheduler(
     effective_mode = (execution_mode or existing_mode).lower()
 
     payload = {
+        "teamId": context['team_id'],
         "appId": context['project_id'],
         "reportId": report_id,
         "schedulerId": scheduler_id,
@@ -665,11 +680,12 @@ async def rerun_test_run(
     report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
     if error:
         return error
-    scheduler_id, error = await _resolve_run_or_scheduler(api_key, context['project_id'], report_id, scheduler, 'scheduler')
+    scheduler_id, error = await _resolve_run_or_scheduler(api_key, context['team_id'], context['project_id'], report_id, scheduler, 'scheduler')
     if error:
         return error
 
     payload = {
+        "teamId": context['team_id'],
         "appId": context['project_id'],
         "reportId": report_id,
         "schedulerId": scheduler_id,
@@ -716,7 +732,7 @@ async def add_test_cases_to_run(
     report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
     if error:
         return error
-    run_id, error = await _resolve_run_or_scheduler(api_key, context['project_id'], report_id, run, 'run')
+    run_id, error = await _resolve_run_or_scheduler(api_key, context['team_id'], context['project_id'], report_id, run, 'run')
     if error:
         return error
 
@@ -724,6 +740,7 @@ async def add_test_cases_to_run(
     # so the field must be a JSON-encoded comma-separated string: '"62551,62552"'
     ids_csv = ','.join(str(i) for i in _parse_testcase_ids(testcase_ids))
     payload = {
+        "teamId": context['team_id'],
         "appId": context['project_id'],
         "reportId": report_id,
         "testExecutionRunId": run_id,
@@ -770,7 +787,7 @@ async def delete_test_run(
     report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
     if error:
         return error
-    run_ids, error = await _resolve_many(api_key, context['project_id'], report_id, runs, 'run')
+    run_ids, error = await _resolve_many(api_key, context['team_id'], context['project_id'], report_id, runs, 'run')
     if error:
         return error
 
@@ -819,7 +836,7 @@ async def delete_test_run_scheduler(
     report_id, error = await _resolve_report(api_key, context['team_id'], context['project_id'], report)
     if error:
         return error
-    scheduler_ids, error = await _resolve_many(api_key, context['project_id'], report_id, schedulers, 'scheduler')
+    scheduler_ids, error = await _resolve_many(api_key, context['team_id'], context['project_id'], report_id, schedulers, 'scheduler')
     if error:
         return error
 
@@ -1042,7 +1059,7 @@ async def _resolve_app_build(api_key: str, team_id: int, project_id: int, app_bu
     return file_id, (match.get('file_name') if match else None), None
 
 
-async def _resolve_run_or_scheduler(api_key: str, project_id: int, report_id: int, identifier: Any, kind: str):
+async def _resolve_run_or_scheduler(api_key: str, team_id: int, project_id: int, report_id: int, identifier: Any, kind: str):
     """
     Resolve a run or scheduler identifier (numeric ID or name) -> id.
     kind is 'run' or 'scheduler'. Requires report_id for the lookup.
@@ -1059,7 +1076,7 @@ async def _resolve_run_or_scheduler(api_key: str, project_id: int, report_id: in
             'message': f"Provide a numeric {kind} id, or pass report so the name can be looked up"
         }
     resp = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params={
-        'appId': project_id, 'reportId': report_id
+        'teamId': team_id, 'appId': project_id, 'reportId': report_id
     })
     if resp.get('status') != 'OK':
         return None, _fetch_error(kind, resp)
@@ -1069,13 +1086,13 @@ async def _resolve_run_or_scheduler(api_key: str, project_id: int, report_id: in
     return _pick_match(details.get('scheduler', []), identifier, 'testrun_execution_run_schedule_id', 'scheduler_name', 'scheduler')
 
 
-async def _get_scheduler_row(api_key: str, project_id: int, report_id: int, scheduler: Any):
+async def _get_scheduler_row(api_key: str, team_id: int, project_id: int, report_id: int, scheduler: Any):
     """
     Resolve a scheduler (id or name) and return its full current row from getList,
     so an edit can preserve unchanged schedule fields. Returns (row_dict, error).
     """
     resp = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params={
-        'appId': project_id, 'reportId': report_id
+        'teamId': team_id, 'appId': project_id, 'reportId': report_id
     })
     if resp.get('status') != 'OK':
         return None, _fetch_error('scheduler', resp)
@@ -1087,7 +1104,7 @@ async def _get_scheduler_row(api_key: str, project_id: int, report_id: int, sche
     return (row or {'testrun_execution_run_schedule_id': sid}), None
 
 
-async def _resolve_many(api_key: str, project_id: int, report_id: int, raw: Any, kind: str):
+async def _resolve_many(api_key: str, team_id: int, project_id: int, report_id: int, raw: Any, kind: str):
     """
     Resolve a comma-separated list of run/scheduler identifiers (IDs or names) -> [ids].
     Fetches the list once when any token is a name.
@@ -1104,7 +1121,7 @@ async def _resolve_many(api_key: str, project_id: int, report_id: int, raw: Any,
         return [int(t) for t in tokens], None
 
     resp = await make_api_request('GET', '/v1/testrunsExecution/getList', api_key, params={
-        'appId': project_id, 'reportId': report_id
+        'teamId': team_id, 'appId': project_id, 'reportId': report_id
     })
     if resp.get('status') != 'OK':
         return None, _fetch_error(kind, resp)

@@ -721,6 +721,7 @@ async def get_requirement_details(
     # GET request - build parameters
     # NOTE: API accepts both camelCase and snake_case variants
     params = {
+        'teamId': context['team_id'],
         'requirementId': requirement_id,  # Can also use 'requirement_id'
         'appId': context['project_id'],    # Can also use 'app_id'
     }
