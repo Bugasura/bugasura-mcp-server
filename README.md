@@ -76,7 +76,17 @@ An API key is only needed for the local STDIO setup described under *Local Devel
 
 ### 2. Install the MCP Server
 
-Add the server URL to your AI tool. No headers, no keys: the client discovers the OAuth sign-in from the server and walks you through it.
+Bugasura is listed in these directories. Install it from there, and sign in to Bugasura when asked:
+
+| Tool | Where to find Bugasura |
+|---|---|
+| ChatGPT and Codex | [ChatGPT plugin directory](https://chatgpt.com/plugins/plugin_asdk_app_6ae9979bf9b88191b85124f98bdafebc) |
+| Claude (web, Desktop, mobile) | [Claude connectors directory](https://claude.ai/directory/bugasura) |
+| Claude Code | `/plugin marketplace add Bugasura/bugasura-mcp-server`, then `/plugin install bugasura@bugasura` |
+
+It's also in the official MCP Registry as `io.bugasura/bugasura`.
+
+Or add the server URL to your AI tool yourself, as below. No headers, no keys: the client discovers the OAuth sign-in from the server and walks you through it.
 
 <details>
 <summary><b>Claude Desktop</b></summary>
@@ -128,7 +138,9 @@ Then run `/mcp` inside Claude Code, choose **Bugasura → Authenticate**, and co
 <details>
 <summary><b>ChatGPT</b></summary>
 
-Settings → Apps & Connectors → Advanced → turn on **Developer mode**, then **Create**:
+Install Bugasura from the [ChatGPT plugin directory](https://chatgpt.com/plugins/plugin_asdk_app_6ae9979bf9b88191b85124f98bdafebc).
+
+To add the server yourself instead: Settings → Apps & Connectors → Advanced → turn on **Developer mode**, then **Create**:
 
 - Name: `Bugasura`
 - MCP Server URL: `https://mcp.bugasura.io/mcp`
@@ -140,6 +152,8 @@ Click **Create**, sign in to Bugasura, and click **Allow**.
 
 <details>
 <summary><b>Codex</b></summary>
+
+Bugasura is in Codex's plugin directory, which it shares with ChatGPT. To add the server yourself instead:
 
 ```bash
 codex mcp add bugasura --url https://mcp.bugasura.io/mcp
