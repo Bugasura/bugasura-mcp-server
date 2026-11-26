@@ -13,6 +13,19 @@ This plugin connects your assistant to Bugasura's hosted MCP server at `https://
 
 Refer to teams, projects and issues by name or key (such as `ISS09`); the server resolves them for you.
 
+## What the tools can change
+
+The tools act in your Bugasura account with your own permissions, so they can only do what you can do in the Bugasura web app. Besides reading your data, they can:
+
+- **Delete.** Permanently delete teams and projects (with everything in them), test cases, requirements, comments, issue attachments, knowledge base documents, pages and folders, test data environments, variables and files, and TestPert features, questions and knowledge base documents. Test runs and schedulers are soft-deleted unless you ask for a permanent delete. Issues and sprints go to Trash, where you can restore them. Tools can also remove test cases from sprints, links between requirements and test cases, and assignees from issues.
+- **Overwrite.** Change or replace existing records, such as issue and test case fields, knowledge base page content, TestPert test plans and generated test cases.
+- **Send.** Adding team members sends them invitation emails. Creating, assigning and commenting on issues, test cases and requirements can notify your teammates through Bugasura's usual notifications.
+- **Change access.** Add or remove team members, change a member's role (admin or member), change a project's visibility, and add or remove assignees.
+- **Run.** Start Bugasura's AI agents on the test cases of a test run, which then test your app.
+- **Upload.** Send files you choose to Bugasura (attachments, knowledge base documents, test data files) and import public websites into a knowledge base.
+
+No tool makes payments or changes billing. The tools that delete or overwrite are marked destructive in their tool annotations, so your client can ask you before running them.
+
 ## Setup
 
 In Claude Code:
