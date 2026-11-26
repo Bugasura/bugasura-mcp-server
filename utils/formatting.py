@@ -2,7 +2,7 @@
 import json
 from typing import Any, Optional
 
-from config.config import SECRET_RESPONSE_KEYS, logger
+from config.config import MARKDOWN_EXTRA_LIST_KEYS, MARKDOWN_MAX_OPTIONS, SECRET_RESPONSE_KEYS, logger
 
 
 # Keys stripped from the upstream response before merging "extras" into the
@@ -40,12 +40,17 @@ def _render_markdown(data: Any, title: Optional[str] = None) -> str:
             if k in data and data[k]:
                 lines.append(f"- **{k}:** {data[k]}")
         if 'options' in data and isinstance(data['options'], list):
+            options = data['options']
+            shown = options[:MARKDOWN_MAX_OPTIONS]
             lines.append("")
-            lines.append(f"**Options ({len(data['options'])}):**")
-            for opt in data['options'][:20]:
+            lines.append(f"**Options ({len(options)}{f', showing {len(shown)}' if len(shown) < len(options) else ''}):**")
+            for opt in shown:
                 if isinstance(opt, dict):
-                    ident = opt.get('team_id') or opt.get('project_id') or opt.get('issue_id') or opt.get('id') or '?'
-                    name = opt.get('team_name') or opt.get('project_name') or opt.get('summary') or opt.get('name') or ''
+                    ident = (opt.get('team_id') or opt.get('project_id') or opt.get('issue_id') or opt.get('id') or
+                             opt.get('sprint_id') or opt.get('test_case_id') or opt.get('comment_id') or '?')
+                    name = (opt.get('team_name') or opt.get('project_name') or opt.get('summary') or opt.get('name') or
+                            opt.get('sprint_name') or opt.get('comment_preview') or
+                            ' '.join(str(opt[k]) for k in ('test_case_number', 'scenario') if opt.get(k)))
                     lines.append(f"- `{ident}` — {name}")
         return "\n".join(lines) if lines else json.dumps(data, indent=2)
 
@@ -60,34 +65,13 @@ def _render_markdown(data: Any, title: Optional[str] = None) -> str:
         if len(data['items']) > len(shown):
             lines.append(f"_Showing the first {len(shown)} rows of this page; request JSON or a smaller max_results to see the rest._")
             lines.append("")
-        for item in shown:
-            if isinstance(item, dict):
-                ident = (item.get('issue_id') or item.get('issue_key') or
-                         item.get('project_id') or item.get('team_id') or
-                         item.get('sprint_id') or item.get('testcase_id') or
-                         item.get('requirement_id') or item.get('kb_id') or
-                         item.get('page_id') or item.get('doc_id') or
-                         item.get('space_key') or item.get('project_key') or
-                         item.get('run_id') or item.get('id') or item.get('folder_id') or '?')
-                name = (item.get('summary') or item.get('project_name') or
-                        item.get('team_name') or item.get('sprint_name') or
-                        item.get('doc_name') or item.get('page_name') or
-                        item.get('page_title') or item.get('space_name') or
-                        item.get('name') or item.get('title') or
-                        item.get('run_name') or item.get('folder_name') or '')
-                extras = []
-                for fk in ('bug_status', 'status', 'severity', 'priority',
-                           'platform', 'assignees'):
-                    if item.get(fk):
-                        extras.append(f"{fk}={item[fk]}")
-                line = f"- `{ident}`"
-                if name:
-                    line += f" {name}"
-                if extras:
-                    line += f" — {' | '.join(extras)}"
-                lines.append(line)
-            else:
-                lines.append(f"- {item}")
+        lines.extend(_markdown_item_line(item) for item in shown)
+        for key in MARKDOWN_EXTRA_LIST_KEYS:
+            extra = data.get(key)
+            if isinstance(extra, list) and extra:
+                lines.append("")
+                lines.append(f"**{key} ({len(extra)}):**")
+                lines.extend(_markdown_item_line(item) for item in extra[:50])
         return "\n".join(lines)
 
     # Generic detail view: key-value dump, skipping verbose/null fields
@@ -99,6 +83,38 @@ def _render_markdown(data: Any, title: Optional[str] = None) -> str:
         else:
             lines.append(f"- **{k}**: {v}")
     return "\n".join(lines) if lines else json.dumps(data, indent=2)
+
+
+def _markdown_item_line(item: Any) -> str:
+    """One envelope row as a markdown bullet: id, name, then a few status fields."""
+    if not isinstance(item, dict):
+        return f"- {item}"
+    # New keys go last: test case comment rows also carry test_case_id, app build rows proj_test_data_env_id.
+    ident = (item.get('issue_id') or item.get('issue_key') or
+             item.get('project_id') or item.get('team_id') or
+             item.get('sprint_id') or item.get('testcase_id') or
+             item.get('requirement_id') or item.get('kb_id') or
+             item.get('page_id') or item.get('doc_id') or
+             item.get('space_key') or item.get('project_key') or
+             item.get('run_id') or item.get('id') or item.get('folder_id') or
+             item.get('comment_id') or item.get('test_case_id') or
+             item.get('proj_test_data_file_id') or item.get('proj_test_data_env_id') or '?')
+    name = (item.get('summary') or item.get('project_name') or
+            item.get('team_name') or item.get('sprint_name') or
+            item.get('doc_name') or item.get('page_name') or
+            item.get('page_title') or item.get('space_name') or
+            item.get('name') or item.get('title') or
+            item.get('run_name') or item.get('folder_name') or
+            item.get('environment_name') or item.get('file_name') or
+            ' '.join(str(item[k]) for k in ('test_case_number', 'scenario') if item.get(k)))
+    extras = [f"{fk}={item[fk]}" for fk in ('bug_status', 'status', 'severity', 'priority', 'platform', 'assignees')
+              if item.get(fk)]
+    line = f"- `{ident}`"
+    if name:
+        line += f" {name}"
+    if extras:
+        line += f" — {' | '.join(extras)}"
+    return line
 
 
 def respond(data: Any, response_format: str = "json") -> Any:
@@ -215,6 +231,55 @@ def paginate_upstream(upstream: dict, items_key: Optional[str] = None,
               and k != items_key
               and k != 'status'}
     return paginated(items, total=total, offset=offset, max_results=max_results, **extras)
+
+
+def picker_paging(offset: int, fetched: int, total: Any, page_size: int, offset_param: str,
+                  shown: Optional[int] = None) -> tuple:
+    """
+    Paging fields for a 'selection_required' menu, and the sentence telling the assistant how to get the next page.
+
+    offset:       the offset this page started at (the tool's *_start_at argument).
+    fetched:      rows this page read upstream; the next page starts after them.
+    total:        the upstream total (e.g. total_rows), or None when unknown.
+    offset_param: the tool argument that takes next_offset, e.g. 'sprint_start_at'.
+    shown:        options actually listed, when some fetched rows were filtered out (default: fetched).
+
+    Returns (fields, hint): merge fields into the menu, append hint to its instruction.
+    """
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        total = None
+    has_more = fetched >= page_size if total is None else offset + fetched < total
+    next_offset = offset + fetched if has_more else None
+    fields = {'total': total, 'offset': offset, 'count': fetched if shown is None else shown,
+              'has_more': has_more, 'next_offset': next_offset}
+    hint = (f' More exist: call again with the same arguments plus {offset_param}={next_offset} for the next page.'
+            if has_more else '')
+    return fields, hint
+
+
+def upstream_failure(response: Any, error: str) -> dict:
+    """A failed reply for a non-OK upstream response; keeps api_key_required and our own failed replies as they are."""
+    if isinstance(response, dict) and response.get('status') in ('failed', 'api_key_required'):
+        return {k: v for k, v in response.items() if k not in ('response_body', 'response_text')}
+    message = response.get('message') if isinstance(response, dict) else None
+    return {
+        'status': 'failed',
+        'error': error,
+        'error_type': 'APIError',
+        'message': message or error,
+    }
+
+
+def picker_offset_past_end(offset_param: str, offset: int) -> dict:
+    """Error for a *_start_at that is past the last row."""
+    return {
+        'status': 'failed',
+        'error': f'Nothing at {offset_param}={offset}',
+        'error_type': 'ValidationError',
+        'message': f'{offset_param} is past the last item. Call again with {offset_param}=0.',
+    }
 
 
 def filter_large_fields(data: dict) -> dict:

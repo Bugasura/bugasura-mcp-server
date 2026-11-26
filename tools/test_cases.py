@@ -7,7 +7,8 @@ from pydantic import Field
 
 from config.config import (
     logger, AGENT_LABELS, BROWSER_AGENT_PLATFORM_TYPES, MOBILE_AGENT_PLATFORM_TYPES, TestCaseExecutionStatus,
-    TestCasePlatformType, TestCaseResultStatus, TestCaseStatus,
+    TestCasePlatformType, TestCaseResultStatus, TestCaseStatus, TEST_CASE_COMMENT_PICKER_PAGE_SIZE,
+    TEST_CASE_PICKER_PAGE_SIZE,
 )
 from core.app import mcp
 from utils.attachments import (
@@ -16,9 +17,137 @@ from utils.attachments import (
 )
 from utils.auth import fetch_user_context, get_api_key, validate_api_key
 from utils.client import make_api_request
-from utils.formatting import paginate_upstream, respond, filter_large_fields
+from utils.formatting import (
+    filter_large_fields, paginate_upstream, picker_offset_past_end, picker_paging, respond, upstream_failure,
+)
 from utils.output_types import ToolResponse
 from utils.resolvers import IdOrName, find_user_ids_by_names_or_emails, select_team_project_context
+
+
+TEST_CASE_START_AT_DESCRIPTION = (
+    f"Offset into the test case picker shown when test_case_id is omitted; pass the picker's next_offset to see the "
+    f"next {TEST_CASE_PICKER_PAGE_SIZE} test cases (default: 0)"
+)
+
+TEST_CASE_COMMENT_START_AT_DESCRIPTION = (
+    f"Offset into the comment picker shown when comment_id is omitted; pass the picker's next_offset to see the "
+    f"next {TEST_CASE_COMMENT_PICKER_PAGE_SIZE} comments (default: 0)"
+)
+
+
+async def _test_case_list_block(api_key: str, team_id, project_id, offset: int) -> dict:
+    """One /v1/testcases/list block of TEST_CASE_LIST_API_PAGE_SIZE rows starting at offset."""
+    # isFirstLoad reads the first block plus the total and totalLoadedCount a later block; neither reads every row.
+    paging = {'totalLoadedCount': offset} if offset else {'isFirstLoad': 1}
+    response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
+        'team_id': team_id, 'app_id': project_id, **paging,
+    })
+    return response if isinstance(response, dict) else {}
+
+
+def _test_case_rows(response: dict) -> list:
+    """The test cases in a /v1/testcases/list reply."""
+    # The API sends [] when there are none; skipping rows without an id is only a guard.
+    return [tc for tc in response.get('testCaseDetails') or [] if isinstance(tc, dict) and tc.get('test_case_id')]
+
+
+async def _test_case_picker(api_key: str, team_id, project_id, test_case_start_at: int, message: str,
+                            tool_name: str) -> dict:
+    """One page of the project's test cases as a 'selection_required' menu, for tools called without test_case_id."""
+    response = await _test_case_list_block(api_key, team_id, project_id, test_case_start_at)
+    if response.get('status') != 'OK':
+        return upstream_failure(response, 'Could not fetch test cases for selection')
+    page = _test_case_rows(response)[:TEST_CASE_PICKER_PAGE_SIZE]
+    # Only the first block's totalTestCasesCount is the project total; a later block's counts its own rows.
+    total = None if test_case_start_at else response.get('totalTestCasesCount')
+    if not page and test_case_start_at:
+        # An empty later block can't tell past-the-end from an empty project, so ask for the first block.
+        first = await _test_case_list_block(api_key, team_id, project_id, 0)
+        if first.get('status') != 'OK':
+            return upstream_failure(first, 'Could not fetch test cases for selection')
+        if _test_case_rows(first):
+            return picker_offset_past_end('test_case_start_at', test_case_start_at)
+    if not page:
+        return {
+            'status': 'failed',
+            'error': 'No test cases found in the selected project.',
+            'error_type': 'NotFound',
+            'suggestion': 'Create one with bugasura_create_test_case first.',
+        }
+
+    paging, more_hint = picker_paging(test_case_start_at, len(page), total,
+                                      TEST_CASE_PICKER_PAGE_SIZE, 'test_case_start_at')
+    return {
+        'status': 'selection_required',
+        'step': 'test_case_selection',
+        'message': message,
+        **paging,
+        'options': [{
+            'test_case_id': tc.get('test_case_id'),
+            'test_case_number': tc.get('test_case_number', ''),
+            'scenario': tc.get('scenario', ''),
+            'severity': tc.get('severity', ''),
+            'priority': tc.get('priority', ''),
+            'testing_type': tc.get('testing_type', ''),
+        } for tc in page],
+        'instruction': (f'Call {tool_name} again with the same arguments plus test_case_id=<selected test_case_id>. '
+                        f'Show users the test_case_number, not the internal id.' + more_hint),
+        'current_context': {'team_id': team_id, 'project_id': project_id},
+    }
+
+
+def _test_case_comment_rows(response: dict, include_system: bool = False) -> list:
+    """The real, not deleted comments in a /v1/testcasecomments/list reply; system comments only if include_system."""
+    # A test case without comments still comes back as one row whose comment fields are all null.
+    return [c for c in (response.get('commentsList') or [])
+            if isinstance(c, dict) and c.get('comment_id') and str(c.get('is_deleted') or 0) == '0'
+            and (include_system or str(c.get('is_system_comment') or 0) == '0')]
+
+
+async def _test_case_comment_picker(api_key: str, team_id, project_id, test_case_id, report_id,
+                                    comment_start_at: int, message: str, instructions: str, extra: dict) -> dict:
+    """One page of a test case's comments as a 'selection_required' menu, for tools called without comment_id."""
+    params = {'team_id': team_id, 'app_id': project_id, 'testCaseId': test_case_id}
+    if report_id is not None:
+        params['report_id'] = report_id
+    response = await make_api_request('GET', '/v1/testcasecomments/list', api_key, params=params)
+    if response.get('status') != 'OK':
+        return upstream_failure(response, 'Could not fetch the test case comments')
+
+    comments = _test_case_comment_rows(response)
+    # The endpoint returns every comment, so page here.
+    page = comments[comment_start_at:comment_start_at + TEST_CASE_COMMENT_PICKER_PAGE_SIZE]
+    if not page and comment_start_at and comments:
+        return picker_offset_past_end('comment_start_at', comment_start_at)
+    if not page:
+        return {
+            'status': 'failed',
+            'error': 'No comments found',
+            'error_type': 'NotFound',
+            'message': f'The selected test case (test_case_id={test_case_id}) has no comments.',
+        }
+
+    paging, more_hint = picker_paging(comment_start_at, len(page), len(comments),
+                                      TEST_CASE_COMMENT_PICKER_PAGE_SIZE, 'comment_start_at')
+    return {
+        'status': 'selection_required',
+        'selection_type': 'comment',
+        'message': message,
+        **paging,
+        'available_comments': [{
+            'comment_id': c.get('comment_id'),
+            'comment_preview': (c.get('comment') or '')[:100] + ('...' if len(c.get('comment') or '') > 100 else ''),
+            'creator_name': c.get('comment_creator_name') or c.get('name') or 'Unknown',
+            'created_dt': c.get('created_dt', ''),
+            'last_modified': c.get('last_modified', ''),
+            'has_attachments': bool(c.get('comment_attachments')),
+            'has_inline_images': bool(c.get('comment_images')),
+        } for c in page],
+        'instructions': instructions + more_hint,
+        **{k: v for k, v in extra.items() if k != 'current_context'},
+        'current_context': {'team_id': team_id, 'project_id': project_id, 'test_case_id': test_case_id,
+                            'report_id': report_id, **extra.get('current_context', {})},
+    }
 
 
 @mcp.tool(
@@ -176,9 +305,7 @@ async def list_test_cases(
     })
     response = filter_large_fields(response)
     if response.get('status') == 'OK' and isinstance(response.get('testCaseDetails'), list):
-        # An empty result still carries the DB layer's [{NROWS: 0, STATUS: 'OK'}] row.
-        response['testCaseDetails'] = [tc for tc in response['testCaseDetails']
-                                       if isinstance(tc, dict) and tc.get('test_case_id')]
+        response['testCaseDetails'] = _test_case_rows(response)
     return respond(paginate_upstream(response, items_key='testCaseDetails', offset=start_at,
                                      max_results=max_results, local=True), response_format)
 
@@ -759,7 +886,7 @@ async def update_test_case(
     annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": True}
 )
 async def delete_test_case(
-    testcase_identifier: str = Field(description="Test case identifier: numeric ID (e.g., '123'), test case key (e.g., 'TES5', 'MCP11'), or scenario text for matching"),
+    testcase_identifier: str = Field(min_length=1, description="Test case identifier: numeric ID (e.g., '123'), test case key (e.g., 'TES5', 'MCP11'), or scenario text for matching"),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint ID (report_id). When provided, unlinks the test case from the sprint instead of deleting it from the project. Get from bugasura_list_sprints."),
@@ -777,6 +904,12 @@ async def delete_test_case(
     validation = await validate_api_key(api_key)
     if not validation.get('valid'):
         return validation
+
+    # Blank text is part of every scenario, so it would match (and delete) any test case.
+    testcase_identifier = testcase_identifier.strip()
+    if not testcase_identifier:
+        return {'status': 'failed', 'error': 'testcase_identifier is empty', 'error_type': 'ValidationError',
+                'message': "Pass the test case's ID, number (e.g. 'TES5') or scenario text."}
 
     context = await select_team_project_context(api_key, team_id, project_id, 'bugasura_delete_test_case', f', testcase_identifier={testcase_identifier}')
     if 'status' in context and context['status'] == 'selection_required':
@@ -841,26 +974,30 @@ async def delete_test_case(
     # Project-level: permanent delete.
     if testcase_id is None:
         logger.info(f"delete_test_case: Searching project {project_id} for '{testcase_identifier}'")
+        # No paging params: the whole list, so a second match can't hide on a later page.
         testcases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-            'team_id': str(team_id), 'app_id': str(project_id), 'start_at': 0, 'max_results': 100,
+            'team_id': str(team_id), 'app_id': str(project_id),
         })
-        if testcases_response.get('status') != 'OK':
-            return {'status': 'failed', 'error': 'Failed to fetch test cases', 'message': testcases_response.get('message', 'Could not retrieve test cases list')}
+        if not isinstance(testcases_response, dict) or testcases_response.get('status') != 'OK':
+            return upstream_failure(testcases_response, 'Failed to fetch test cases')
 
-        testcases = testcases_response.get('testCases', [])
-        matching_testcases = [tc for tc in testcases if tc.get('test_case_key', '').upper() == testcase_identifier.upper()]
+        testcases = _test_case_rows(testcases_response)
+        ident_upper = testcase_identifier.upper()
+        matching_testcases = [tc for tc in testcases if str(tc.get('test_case_number') or '').upper() == ident_upper]
         if not matching_testcases:
-            matching_testcases = [tc for tc in testcases if tc.get('scenario', '').lower() == testcase_identifier.lower()]
+            matching_testcases = [tc for tc in testcases if str(tc.get('scenario') or '').lower() == testcase_identifier.lower()]
         if not matching_testcases:
-            matching_testcases = [tc for tc in testcases if testcase_identifier.lower() in tc.get('scenario', '').lower()]
+            matching_testcases = [tc for tc in testcases if testcase_identifier.lower() in str(tc.get('scenario') or '').lower()]
 
         if not matching_testcases:
-            return {'status': 'failed', 'error': 'Test case not found', 'message': f"No test case found with key or scenario '{testcase_identifier}' in project {project_id}"}
+            return {'status': 'failed', 'error': 'Test case not found', 'error_type': 'NotFound',
+                    'message': f"No test case found with key or scenario '{testcase_identifier}' in project {project_id}"}
         if len(matching_testcases) > 1:
-            testcase_list = '\n'.join([f"  - ID: {tc['project_test_case_id']}, Key: {tc.get('test_case_key', 'N/A')}, Scenario: {tc['scenario']}" for tc in matching_testcases[:10]])
-            return {'status': 'failed', 'error': 'Multiple test cases found', 'message': f"Multiple test cases match '{testcase_identifier}'. Please use the test case ID or unique key:\n{testcase_list}"}
+            testcase_list = '\n'.join([f"  - ID: {tc.get('test_case_id')}, Key: {tc.get('test_case_number') or 'N/A'}, Scenario: {tc.get('scenario')}" for tc in matching_testcases[:10]])
+            return {'status': 'failed', 'error': 'Multiple test cases found', 'error_type': 'Ambiguous',
+                    'message': f"Multiple test cases match '{testcase_identifier}'. Please use the test case ID or unique key:\n{testcase_list}"}
 
-        testcase_id = matching_testcases[0]['project_test_case_id']
+        testcase_id = matching_testcases[0]['test_case_id']
         logger.info(f"delete_test_case: Resolved '{testcase_identifier}' to testcase_id={testcase_id}")
 
     logger.info(f"delete_test_case: project-level delete for testcase_id={testcase_id}, team_id={team_id}, project_id={project_id}")
@@ -1165,6 +1302,7 @@ async def list_test_case_comments(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
+    test_case_start_at: int = Field(default=0, ge=0, description=TEST_CASE_START_AT_DESCRIPTION),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
     start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
     max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
@@ -1202,50 +1340,7 @@ async def list_test_case_comments(
 
     # Now we have team_id and project_id, check if test_case_id is provided
     if test_case_id is None:
-        # Fetch available test cases for selection using CORRECTED API call
-        test_cases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-            'team_id': team_id,
-            'app_id': project_id,  # API expects 'app_id'
-            'start_at': 0,
-            'max_results': 100
-        })
-
-        # FIXED: Use 'testCasesList' and proper field names
-        if test_cases_response.get('status') == 'OK' and test_cases_response.get('testCasesList'):
-            return respond({
-                'status': 'selection_required',
-                'selection_type': 'test_case',
-                'message': 'Please select a test case to view comments',
-                'available_test_cases': [
-                    {
-                        'test_case_id': tc.get('id'),  # FIXED: Use 'id' field
-                        'test_case_number': tc.get('test_case_number', ''),
-                        'title': tc.get('title', 'Untitled Test Case'),
-                        'scenario': tc.get('scenario', 'No scenario'),
-                        'status': tc.get('status', 'Unknown'),
-                        'priority': tc.get('priority', 'Unknown'),
-                        'testing_type': tc.get('testing_type', 'Unknown'),
-                        'feature_name': tc.get('feature_name', '')
-                    }
-                    for tc in test_cases_response.get('testCasesList', [])
-                ],
-                'total_count': test_cases_response.get('totalCount', 0),
-                'instructions': 'Call this function again with the selected test_case_id parameter',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id
-                }
-            }, response_format)
-        else:
-            return respond({
-                'status': 'ERROR',
-                'message': f'No test cases found for the selected project (team_id={team_id}, project_id={project_id}) or unable to fetch test cases',
-                'debug_info': {
-                    'response_status': test_cases_response.get('status'),
-                    'response_message': test_cases_response.get('message', ''),
-                    'response_keys': list(test_cases_response.keys()) if test_cases_response else []
-                }
-            }, response_format)
+        return respond(await _test_case_picker(api_key, team_id, project_id, test_case_start_at, 'Please select a test case to view comments', 'bugasura_list_test_case_comments'), response_format)
 
     # All required parameters provided - proceed with fetching test case comments
     params = {
@@ -1259,13 +1354,18 @@ async def list_test_case_comments(
         params['report_id'] = report_id
 
     response = await make_api_request('GET', '/v1/testcasecomments/list', api_key, params=params)
+    if response.get('status') != 'OK':
+        return respond(upstream_failure(response, 'Could not fetch the test case comments'), response_format)
+    # No comments comes back as commentsList missing, or as one row whose comment fields are all null.
+    response['commentsList'] = _test_case_comment_rows(response, include_system=True)
 
     # Attach test case details fetched before listing comments
     response['test_case_before'] = await _fetch_test_case(api_key, team_id, project_id, test_case_id)
 
     # Filter out large unnecessary fields to reduce payload size, then wrap in envelope
     response = filter_large_fields(response)
-    return respond(paginate_upstream(response, offset=start_at, max_results=max_results, local=True), response_format)
+    return respond(paginate_upstream(response, items_key='commentsList', offset=start_at, max_results=max_results,
+                                     local=True), response_format)
 
 
 @mcp.tool(
@@ -1279,6 +1379,7 @@ async def add_test_case_comment(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
+    test_case_start_at: int = Field(default=0, ge=0, description=TEST_CASE_START_AT_DESCRIPTION),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
     parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for threaded replies (optional)"),
     upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION),
@@ -1309,8 +1410,9 @@ async def add_test_case_comment(
     # Validate comment is not empty
     if not comment or comment.strip() == '':
         return {
-            'status': 'ERROR',
-            'message': 'Comment content is required and cannot be empty'
+            'status': 'failed',
+            'error': 'Comment content is required and cannot be empty',
+            'error_type': 'ValidationError',
         }
 
     # Use centralized context selection helper for team and project
@@ -1326,51 +1428,7 @@ async def add_test_case_comment(
 
     # Now we have team_id and project_id, check if test_case_id is provided
     if test_case_id is None:
-        # Fetch available test cases for selection using CORRECTED API call
-        test_cases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-            'team_id': team_id,
-            'app_id': project_id,
-            'start_at': 0,
-            'max_results': 100
-        })
-
-        # FIXED: Use 'testCasesList' and proper field names
-        if test_cases_response.get('status') == 'OK' and test_cases_response.get('testCasesList'):
-            return {
-                'status': 'selection_required',
-                'selection_type': 'test_case',
-                'message': 'Please select a test case to add comment',
-                'available_test_cases': [
-                    {
-                        'test_case_id': tc.get('id'),  # FIXED: Use 'id' field
-                        'test_case_number': tc.get('test_case_number', ''),
-                        'title': tc.get('title', 'Untitled Test Case'),
-                        'scenario': tc.get('scenario', 'No scenario'),
-                        'status': tc.get('status', 'Unknown'),
-                        'priority': tc.get('priority', 'Unknown'),
-                        'testing_type': tc.get('testing_type', 'Unknown'),
-                        'feature_name': tc.get('feature_name', '')
-                    }
-                    for tc in test_cases_response.get('testCasesList', [])
-                ],
-                'total_count': test_cases_response.get('totalCount', 0),
-                'instructions': 'Call this function again with the selected test_case_id parameter',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id,
-                    'comment': comment
-                }
-            }
-        else:
-            return {
-                'status': 'ERROR',
-                'message': f'No test cases found for the selected project (team_id={team_id}, project_id={project_id}) or unable to fetch test cases',
-                'debug_info': {
-                    'response_status': test_cases_response.get('status'),
-                    'response_message': test_cases_response.get('message', ''),
-                    'response_keys': list(test_cases_response.keys()) if test_cases_response else []
-                }
-            }
+        return await _test_case_picker(api_key, team_id, project_id, test_case_start_at, 'Please select a test case to add comment', 'bugasura_add_test_case_comment')
 
     # All required parameters provided - proceed with adding comment
     payload = {
@@ -1417,6 +1475,7 @@ async def get_test_case_comment(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
+    test_case_start_at: int = Field(default=0, ge=0, description=TEST_CASE_START_AT_DESCRIPTION),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
     parent_comment_id: Optional[int] = Field(default=None, description="Parent comment ID for fetching threaded replies (optional)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -1445,8 +1504,9 @@ async def get_test_case_comment(
     # Validate comment_id is provided (required parameter)
     if comment_id is None or comment_id <= 0:
         return respond({
-            'status': 'ERROR',
-            'message': 'comment_id is required and must be a positive integer'
+            'status': 'failed',
+            'error': 'comment_id is required and must be a positive integer',
+            'error_type': 'ValidationError',
         }, response_format)
 
     # Use centralized context selection helper for team and project
@@ -1464,51 +1524,7 @@ async def get_test_case_comment(
     project_id = context['project_id']
 
     if test_case_id is None:
-        # Fetch available test cases for selection using CORRECTED API call
-        test_cases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-            'team_id': team_id,
-            'app_id': project_id,
-            'start_at': 0,
-            'max_results': 100
-        })
-
-        # FIXED: Use 'testCasesList' and proper field names
-        if test_cases_response.get('status') == 'OK' and test_cases_response.get('testCasesList'):
-            return respond({
-                'status': 'selection_required',
-                'selection_type': 'test_case',
-                'message': 'Please select a test case to fetch comment from',
-                'available_test_cases': [
-                    {
-                        'test_case_id': tc.get('id'),  # FIXED: Use 'id' field
-                        'test_case_number': tc.get('test_case_number', ''),
-                        'title': tc.get('title', 'Untitled Test Case'),
-                        'scenario': tc.get('scenario', 'No scenario'),
-                        'status': tc.get('status', 'Unknown'),
-                        'priority': tc.get('priority', 'Unknown'),
-                        'testing_type': tc.get('testing_type', 'Unknown'),
-                        'feature_name': tc.get('feature_name', '')
-                    }
-                    for tc in test_cases_response.get('testCasesList', [])
-                ],
-                'total_count': test_cases_response.get('totalCount', 0),
-                'instructions': 'Call this function again with the selected test_case_id parameter',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id,
-                    'comment_id': comment_id
-                }
-            }, response_format)
-        else:
-            return respond({
-                'status': 'ERROR',
-                'message': f'No test cases found for the selected project (team_id={team_id}, project_id={project_id}) or unable to fetch test cases',
-                'debug_info': {
-                    'response_status': test_cases_response.get('status'),
-                    'response_message': test_cases_response.get('message', ''),
-                    'response_keys': list(test_cases_response.keys()) if test_cases_response else []
-                }
-            }, response_format)
+        return respond(await _test_case_picker(api_key, team_id, project_id, test_case_start_at, 'Please select a test case to fetch comment from', 'bugasura_get_test_case_comment'), response_format)
 
     # All required parameters provided - proceed with fetching comment details
     params = {
@@ -1570,7 +1586,9 @@ async def update_test_case_comment(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
+    test_case_start_at: int = Field(default=0, ge=0, description=TEST_CASE_START_AT_DESCRIPTION),
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to update (optional - will prompt if not provided, ge=1)", ge=1),
+    comment_start_at: int = Field(default=0, ge=0, description=TEST_CASE_COMMENT_START_AT_DESCRIPTION),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
     comment_attachments: Optional[str] = Field(default=None, description="Comma-separated list of the existing attachment filenames to keep (optional). Omit to keep them all; '' removes them all."),
     upload_id: Optional[str] = Field(default=None, description=ATTACH_UPLOAD_ID_DESCRIPTION + " The files are added to the comment's attachments."),
@@ -1602,8 +1620,9 @@ async def update_test_case_comment(
     # Validate comment is not empty
     if not comment or comment.strip() == '':
         return {
-            'status': 'ERROR',
-            'message': 'Comment content is required and cannot be empty'
+            'status': 'failed',
+            'error': 'Comment content is required and cannot be empty',
+            'error_type': 'ValidationError',
         }
 
     # Use centralized context selection helper for team and project
@@ -1622,98 +1641,15 @@ async def update_test_case_comment(
 
     # Check if test_case_id is provided
     if test_case_id is None:
-        # Fetch available test cases for selection using CORRECTED API call
-        test_cases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-            'team_id': team_id,
-            'app_id': project_id,
-            'start_at': 0,
-            'max_results': 100
-        })
-
-        # FIXED: Use 'testCasesList' and proper field names
-        if test_cases_response.get('status') == 'OK' and test_cases_response.get('testCasesList'):
-            return {
-                'status': 'selection_required',
-                'selection_type': 'test_case',
-                'message': 'Please select a test case',
-                'available_test_cases': [
-                    {
-                        'test_case_id': tc.get('id'),  # FIXED: Use 'id' field
-                        'test_case_number': tc.get('test_case_number', ''),
-                        'title': tc.get('title', 'Untitled Test Case'),
-                        'scenario': tc.get('scenario', 'No scenario'),
-                        'status': tc.get('status', 'Unknown'),
-                        'priority': tc.get('priority', 'Unknown'),
-                        'testing_type': tc.get('testing_type', 'Unknown'),
-                        'feature_name': tc.get('feature_name', '')
-                    }
-                    for tc in test_cases_response.get('testCasesList', [])
-                ],
-                'total_count': test_cases_response.get('totalCount', 0),
-                'instructions': 'Call this function again with the selected test_case_id parameter',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id,
-                    'comment': comment
-                }
-            }
-        else:
-            return {
-                'status': 'ERROR',
-                'message': f'No test cases found for the selected project (team_id={team_id}, project_id={project_id}) or unable to fetch test cases',
-                'debug_info': {
-                    'response_status': test_cases_response.get('status'),
-                    'response_message': test_cases_response.get('message', ''),
-                    'response_keys': list(test_cases_response.keys()) if test_cases_response else []
-                }
-            }
+        return await _test_case_picker(api_key, team_id, project_id, test_case_start_at, 'Please select a test case', 'bugasura_update_test_case_comment')
 
     # Check if comment_id is provided
     if comment_id is None:
-        # Fetch available comments for the test case
-        comments_params = {
-            'team_id': team_id,
-            'app_id': project_id,
-            'testCaseId': test_case_id
-        }
-
-        if report_id is not None:
-            comments_params['report_id'] = report_id
-
-        comments_response = await make_api_request('GET', '/v1/testcasecomments/list', api_key, params=comments_params)
-
-        if comments_response.get('status') == 'OK' and comments_response.get('testCaseCommentsList'):
-            return {
-                'status': 'selection_required',
-                'selection_type': 'comment',
-                'message': 'Please select a comment to update',
-                'available_comments': [
-                    {
-                        'comment_id': c.get('comment_id'),
-                        'comment_preview': (c.get('comment', '')[:100] + '...') if len(c.get('comment', '')) > 100 else c.get('comment', ''),
-                        'creator_name': c.get('creator_name', 'Unknown'),
-                        'created_dt': c.get('created_dt', ''),
-                        'last_modified': c.get('last_modified', ''),
-                        'is_deleted': c.get('is_deleted', False),
-                        'has_attachments': bool(c.get('comment_attachments'))
-                    }
-                    for c in comments_response.get('testCaseCommentsList', [])
-                    if not c.get('is_deleted', False)
-                ],
-                'instructions': 'Call this function again with the selected comment_id parameter. Note: You can only update comments you created.',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id,
-                    'test_case_id': test_case_id,
-                    'report_id': report_id,
-                    'comment': comment
-                }
-            }
-        else:
-            return {
-                'status': 'ERROR',
-                'message': 'No comments found for the selected test case or unable to fetch comments'
-            }
+        return await _test_case_comment_picker(
+            api_key, team_id, project_id, test_case_id, report_id, comment_start_at,
+            'Please select a comment to update',
+            'Call this function again with the selected comment_id parameter. Note: You can only update comments you created.',
+            {'current_context': {'comment': comment}})
 
     # All required parameters provided - proceed with updating comment
     # Fetch and attach test case details before updating comment
@@ -1778,7 +1714,9 @@ async def delete_test_case_comment(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     test_case_id: Optional[int] = Field(default=None, description="Test case identifier (optional - will prompt if not provided)"),
+    test_case_start_at: int = Field(default=0, ge=0, description=TEST_CASE_START_AT_DESCRIPTION),
     comment_id: Optional[int] = Field(default=None, description="Comment identifier to delete (optional - will prompt if not provided, ge=1)", ge=1),
+    comment_start_at: int = Field(default=0, ge=0, description=TEST_CASE_COMMENT_START_AT_DESCRIPTION),
     report_id: Optional[int] = Field(default=None, description="Report identifier (optional, ge=1)", ge=1),
 ) -> ToolResponse:
     """
@@ -1837,110 +1775,15 @@ async def delete_test_case_comment(
 
     # Check if test_case_id is provided
     if test_case_id is None:
-        # Fetch available test cases for selection
-        test_cases_response = await make_api_request('GET', '/v1/testcases/list', api_key, params={
-            'team_id': team_id,
-            'app_id': project_id,
-            'start_at': 0,
-            'max_results': 100
-        })
-
-        # FIXED: Check for 'testCasesList' instead of 'testCases'
-        if test_cases_response.get('status') == 'OK' and test_cases_response.get('testCasesList'):
-            return {
-                'status': 'selection_required',
-                'selection_type': 'test_case',
-                'message': 'Please select a test case',
-                'available_test_cases': [
-                    {
-                        'test_case_id': tc.get('id'),  # Use test_case_id from response
-                        'test_case_number': tc.get('test_case_number', ''),
-                        'scenario': tc.get('scenario', 'No scenario'),
-                        'testing_type': tc.get('testing_type', 'Unknown'),
-                        'priority': tc.get('priority', 'Unknown'),
-                        'feature_name': tc.get('feature_name', ''),
-                        'creator_name': tc.get('creator_name', 'Unknown')
-                    }
-                    for tc in test_cases_response.get('testCasesList', [])
-                ],
-                'instructions': 'Call this function again with the selected test_case_id parameter',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id
-                }
-            }
-        else:
-            return {
-                'status': 'ERROR',
-                'message': f'No test cases found for the selected project (team_id={team_id}, project_id={project_id}) or unable to fetch test cases',
-                'debug_info': {
-                    'response_status': test_cases_response.get('status'),
-                    'response_keys': list(test_cases_response.keys()) if test_cases_response else []
-                }
-            }
+        return await _test_case_picker(api_key, team_id, project_id, test_case_start_at, 'Please select a test case', 'bugasura_delete_test_case_comment')
 
     # Check if comment_id is provided
     if comment_id is None:
-        # Fetch available comments for the test case
-        comments_params = {
-            'team_id': team_id,
-            'app_id': project_id,
-            'testCaseId': test_case_id
-        }
-
-        if report_id is not None:
-            comments_params['report_id'] = report_id
-
-        comments_response = await make_api_request('GET', '/v1/testcasecomments/list', api_key, params=comments_params)
-
-        if comments_response.get('status') == 'OK' and comments_response.get('testCaseCommentsList'):
-            # Filter out already deleted comments
-            available_comments = [
-                c for c in comments_response.get('testCaseCommentsList', [])
-                if not c.get('is_deleted', False)
-            ]
-
-            if not available_comments:
-                return {
-                    'status': 'ERROR',
-                    'message': 'No comments available to delete for this test case'
-                }
-
-            return {
-                'status': 'selection_required',
-                'selection_type': 'comment',
-                'message': 'WARNING: Deletion is permanent and cannot be undone. Please select a comment to delete:',
-                'available_comments': [
-                    {
-                        'comment_id': c.get('comment_id'),
-                        'comment_preview': (c.get('comment', '')[:100] + '...') if len(c.get('comment', '')) > 100 else c.get('comment', ''),
-                        'creator_name': c.get('creator_name', 'Unknown'),
-                        'created_dt': c.get('created_dt', ''),
-                        'last_modified': c.get('last_modified', ''),
-                        'has_attachments': bool(c.get('comment_attachments')),
-                        'has_inline_images': bool(c.get('comment_images'))
-                    }
-                    for c in available_comments
-                ],
-                'instructions': 'Call this function again with the selected comment_id parameter. Note: You can only delete comments you created.',
-                'warning': 'This action cannot be undone. All attachments and inline images will be permanently deleted.',
-                'current_context': {
-                    'team_id': team_id,
-                    'project_id': project_id,
-                    'test_case_id': test_case_id,
-                    'report_id': report_id
-                }
-            }
-        else:
-            return {
-                'status': 'ERROR',
-                'message': f'No comments found for the selected test case (test_case_id={test_case_id}) or unable to fetch comments',
-                'debug_info': {
-                    'response_status': comments_response.get('status'),
-                    'response_message': comments_response.get('message', ''),
-                    'response_keys': list(comments_response.keys()) if comments_response else []
-                }
-            }
+        return await _test_case_comment_picker(
+            api_key, team_id, project_id, test_case_id, report_id, comment_start_at,
+            'WARNING: Deletion is permanent and cannot be undone. Please select a comment to delete:',
+            'Call this function again with the selected comment_id parameter. Note: You can only delete comments you created.',
+            {'warning': 'This action cannot be undone. All attachments and inline images will be permanently deleted.'})
 
     # All required parameters provided - proceed with deleting comment
 

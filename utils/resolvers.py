@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 from pydantic import Field
 
-from config.config import logger
+from config.config import logger, SPRINT_LIST_MAX_RESULTS, SPRINT_NAME_SEARCH_MAX_PAGES
 from utils.auth import fetch_user_context
 from utils.client import make_api_request
 
@@ -400,6 +400,39 @@ async def find_user_ids_by_names_or_emails(api_key: str, team_id: int, identifie
         }
 
     return {'status': 'OK', 'user_ids': ','.join(resolved_ids)}
+
+
+async def find_sprints_by_name(api_key: str, team_id, project_id, name: str) -> dict:
+    """{'status': 'OK', 'sprints': [...], 'truncated': bool} with the sprints whose name contains `name`, or the failed reply.
+
+    The backend filters with LIKE and returns at most 100 rows a call, so full pages are read on until a short one;
+    truncated is True when the page limit stopped the search with rows still coming.
+    """
+    sprints, seen = [], set()
+    # LIKE treats a backslash as its escape character; % and _ are left alone, as they only widen the match.
+    search_text = name.replace('\\', '\\\\')
+    for page in range(SPRINT_NAME_SEARCH_MAX_PAGES):
+        response = await make_api_request('GET', '/v1/sprints/list', api_key, params={
+            'team_id': str(team_id),
+            'project_id': str(project_id),
+            'search_text': search_text,
+            'start_at': page * SPRINT_LIST_MAX_RESULTS,
+            'max_results': SPRINT_LIST_MAX_RESULTS,
+        })
+        if not isinstance(response, dict):
+            return {'status': 'failed', 'error': 'Unexpected sprint list response',
+                    'error_type': 'ResponseFormatError', 'message': 'The sprint list came back in an unexpected format.'}
+        if response.get('status') != 'OK':
+            return response
+        rows = [s for s in response.get('sprintsList') or [] if isinstance(s, dict)]
+        # Older API builds don't sort the sprint list, so a row can turn up on two pages.
+        for s in rows:
+            if str(s.get('sprint_id')) not in seen:
+                seen.add(str(s.get('sprint_id')))
+                sprints.append(s)
+        if len(rows) < SPRINT_LIST_MAX_RESULTS:
+            return {'status': 'OK', 'sprints': sprints, 'truncated': False}
+    return {'status': 'OK', 'sprints': sprints, 'truncated': True}
 
 
 async def resolve_issue_ref(api_key: str, context: dict, issue_id, tool_name: str) -> tuple:

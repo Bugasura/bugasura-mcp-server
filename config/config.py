@@ -291,6 +291,25 @@ TESTPERT_REQ_CONTEXT_STAGE_STATUSES = {
 TESTPERT_STAGE_CONTEXT_TABLE_HINT = (
     "followed by stage_context.table exactly as given: it is a markdown table, so show it as a table (not inside a code block) and keep its <br> line breaks. Don't redraw, reformat or summarise it, and don't add other HTML. Never show numeric ids or field names."
 )
+# Most rows /v1/sprints/list returns per call (the API clamps max_results to 10..100).
+SPRINT_LIST_MAX_RESULTS = 100
+# Most pages a sprint name search reads, so a name shared by over 100 sprints still finds the exact one.
+SPRINT_NAME_SEARCH_MAX_PAGES = 10
+# Sprints per page in bugasura_create_issue's sprint picker.
+SPRINT_PICKER_PAGE_SIZE = 50
+# Rows per page in the issue, issue comment and test case pickers ('selection_required' menus).
+ISSUE_PICKER_PAGE_SIZE = 20
+ISSUE_COMMENT_PICKER_PAGE_SIZE = 20
+# Rows /v1/testcases/list returns per paged call (the API's fixed page size).
+TEST_CASE_LIST_API_PAGE_SIZE = 25
+# One paged call per menu page, so a full page means more may follow.
+TEST_CASE_PICKER_PAGE_SIZE = TEST_CASE_LIST_API_PAGE_SIZE
+TEST_CASE_COMMENT_PICKER_PAGE_SIZE = 20
+# Most options a markdown menu lists: the largest picker page, so no row of a paged menu is hidden.
+MARKDOWN_MAX_OPTIONS = max(SPRINT_PICKER_PAGE_SIZE, ISSUE_PICKER_PAGE_SIZE, ISSUE_COMMENT_PICKER_PAGE_SIZE,
+                           TEST_CASE_PICKER_PAGE_SIZE, TEST_CASE_COMMENT_PICKER_PAGE_SIZE)
+# Lists a markdown envelope shows besides its items (bugasura_list_test_run_environments' app builds).
+MARKDOWN_EXTRA_LIST_KEYS = ('appBuildList',)
 # Per-file cap for issue/comment/requirement attachments sent by the MCP (the API's own limits are
 # per team plan for issues and 100 MB for requirements)
 ATTACHMENT_MAX_FILE_SIZE_MB = 100

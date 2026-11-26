@@ -7,9 +7,9 @@ from config.config import logger
 from core.app import mcp
 from utils.auth import get_api_key, validate_api_key
 from utils.client import make_api_request
-from utils.formatting import paginate_upstream, respond
+from utils.formatting import paginate_upstream, respond, upstream_failure
 from utils.output_types import ToolResponse
-from utils.resolvers import IdOrName, select_team_project_context
+from utils.resolvers import IdOrName, find_sprints_by_name, select_team_project_context
 
 
 @mcp.tool(
@@ -344,9 +344,11 @@ async def update_sprint(
 
     # Step 1: Fetch existing sprint details to preserve unmodified fields
     logger.info(f"Fetching existing sprint details for sprint_id={sprint_id}")
+    # Filter by sprint_id upstream; the unfiltered list is paged at 10, so later sprints lost their fields.
     existing_sprint_response = await make_api_request('GET', '/v1/sprints/list', api_key, params={
         'team_id': team_id,
-        'project_id': context.get('project_id')  # Use project_id from context if available
+        'project_id': context.get('project_id'),
+        'sprint_id': sprint_id,
     })
 
     # Find the specific sprint from the list
@@ -354,9 +356,18 @@ async def update_sprint(
     if existing_sprint_response.get('status') == 'OK':
         sprints_list = existing_sprint_response.get('sprintsList', [])
         for sprint in sprints_list:
-            if sprint.get('sprint_id') == sprint_id:
+            if str(sprint.get('sprint_id')) == str(sprint_id):
                 sprint_data = sprint
                 break
+
+    # Asked by id the API also returns trashed sprints; is_deleted is only sent by newer API builds.
+    if sprint_data and str(sprint_data.get('is_deleted') or 0) != '0':
+        return {
+            'status': 'failed',
+            'error': 'Sprint is in Trash',
+            'error_type': 'NotFound',
+            'message': f"Sprint {sprint_id} is in Trash. Restore it in the web app before updating it.",
+        }
 
     if not sprint_data:
         logger.warning(f"Could not fetch existing sprint data for sprint_id={sprint_id}, proceeding with only provided fields")
@@ -462,31 +473,40 @@ async def delete_sprint(
     else:
         # It's a name - search for the sprint
         logger.info(f"delete_sprint: Searching for sprint by name: '{sprint_identifier}'")
-        sprints_response = await make_api_request('GET', '/v1/sprints/list', api_key, params={
-            'team_id': str(team_id),
-            'project_id': str(project_id)
-        })
-
-        if sprints_response.get('status') != 'OK':
+        if not sprint_identifier.strip():
             return {
                 'status': 'failed',
-                'error': 'Failed to fetch sprints',
-                'message': sprints_response.get('message', 'Could not retrieve sprints list')
+                'error': 'sprint_identifier is empty',
+                'error_type': 'ValidationError',
+                'message': 'Pass the sprint ID or its exact name.',
+            }
+        found = await find_sprints_by_name(api_key, team_id, project_id, sprint_identifier.strip())
+        if found.get('status') != 'OK':
+            return upstream_failure(found, 'Failed to fetch sprints')
+        if found['truncated']:
+            # Too many similar names to rule out a second sprint with this exact name, so don't delete by name.
+            return {
+                'status': 'failed',
+                'error': 'Too many sprints match this name',
+                'error_type': 'Ambiguous',
+                'message': (f"Over {len(found['sprints'])} sprints have names containing '{sprint_identifier}'. "
+                            "Pass the sprint ID to delete one (bugasura_list_sprints shows the IDs)."),
             }
 
-        # Search for sprint by name (case-insensitive)
-        sprints = sprints_response.get('sprintsList', [])
-        matching_sprints = [s for s in sprints if s.get('sprint_name', '').lower() == sprint_identifier.lower()]
+        # Deleting by name needs the exact name (case-insensitive); a partial match could trash the wrong sprint.
+        wanted = sprint_identifier.strip().lower()
+        similar = found['sprints']
+        matching_sprints = [s for s in similar if str(s.get('sprint_name', '')).strip().lower() == wanted]
 
         if not matching_sprints:
-            # Try partial match
-            matching_sprints = [s for s in sprints if sprint_identifier.lower() in s.get('sprint_name', '').lower()]
-
-        if not matching_sprints:
+            suggestions = '\n'.join(f"  - ID: {s['sprint_id']}, Name: {s['sprint_name']}" for s in similar[:20])
             return {
                 'status': 'failed',
                 'error': 'Sprint not found',
-                'message': f"No sprint found with name '{sprint_identifier}' in project {project_id}"
+                'error_type': 'NotFound',
+                'message': (f"No sprint is named exactly '{sprint_identifier}' in project {project_id}. "
+                            + (f"Sprints with similar names (pass the sprint ID to delete one):\n{suggestions}"
+                               if suggestions else "Use bugasura_list_sprints to see the sprint names.")),
             }
 
         if len(matching_sprints) > 1:
@@ -494,7 +514,8 @@ async def delete_sprint(
             return {
                 'status': 'failed',
                 'error': 'Multiple sprints found',
-                'message': f"Multiple sprints match '{sprint_identifier}'. Please use the sprint ID instead:\n{sprint_list}"
+                'error_type': 'Ambiguous',
+                'message': f"Several sprints are named '{sprint_identifier}'. Please use the sprint ID instead:\n{sprint_list}"
             }
 
         sprint_id = matching_sprints[0]['sprint_id']

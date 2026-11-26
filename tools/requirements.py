@@ -163,6 +163,8 @@ async def list_requirement_folders(
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     parent_folder_id: Optional[int] = Field(default=None, description="Filter by parent folder ID (optional - omit to get all folders)"),
     include_hierarchy: bool = Field(default=True, description="Include full folder hierarchy (default: True)"),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -293,8 +295,10 @@ async def list_requirement_folders(
     else:
         message = f"Retrieved {len(folders_list)} requirement folders"
 
-    return respond(paginated(folders_list, total=len(folders_list), offset=0,
-                      folders=folders_list,
+    # The endpoint returns every folder, so page here; a nested folder stays inside its parent's children.
+    page = folders_list[start_at:start_at + max_results]
+    return respond(paginated(page, total=len(folders_list), offset=start_at, max_results=max_results,
+                      folders=page,
                       project_id=project_id, team_id=team_id, message=message), response_format)
 
 

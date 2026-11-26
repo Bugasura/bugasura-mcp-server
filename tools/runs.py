@@ -10,13 +10,13 @@ from typing import Any, List, Literal, Optional
 
 from pydantic import Field
 
-from config.config import logger
+from config.config import logger, TEST_DATA_DB_META_KEYS
 from core.app import mcp
 from utils.auth import get_api_key, validate_api_key
 from utils.client import make_api_request
-from utils.formatting import paginate_upstream, respond
+from utils.formatting import paginate_upstream, respond, upstream_failure
 from utils.output_types import ToolResponse
-from utils.resolvers import IdOrName, select_team_project_context
+from utils.resolvers import IdOrName, find_sprints_by_name, select_team_project_context
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,9 @@ from utils.resolvers import IdOrName, select_team_project_context
 async def list_test_run_environments(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
-    include_app_builds: bool = Field(default=True, description="Also return the app build files for each environment (default: True)"),
+    include_app_builds: bool = Field(default=True, description="Also return the project's app build files (default: True; for many builds use bugasura_list_test_data_app_builds, which pages)"),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset into the environments (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of environments to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -54,7 +56,21 @@ async def list_test_run_environments(
     if include_app_builds:
         params['fetchAppBuildList'] = 1
 
-    return respond(await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params=params), response_format)
+    response = await make_api_request('GET', '/v1/projectTestDataEnvironments/get', api_key, params=params)
+    if not isinstance(response, dict) or response.get('status') != 'OK':
+        # No environments is still status OK with an empty list, so this is a real failure.
+        return respond(upstream_failure(response if isinstance(response, dict) else {},
+                                        'Could not fetch the test run environments'), response_format)
+    if isinstance(response.get('environmentDetails'), list):
+        # The endpoint returns every environment, so page here; drop a row that holds only NROWS/STATUS.
+        response['environmentDetails'] = [env for env in response['environmentDetails']
+                                          if isinstance(env, dict) and set(env) - set(TEST_DATA_DB_META_KEYS)]
+    envelope = paginate_upstream(response, items_key='environmentDetails', offset=start_at,
+                                 max_results=max_results, local=True)
+    if isinstance(envelope, dict) and isinstance(envelope.get('items'), list):
+        # Keep the old key next to items for one release, as the README's envelope row promises.
+        envelope['environmentDetails'] = envelope['items']
+    return respond(envelope, response_format)
 
 
 # ---------------------------------------------------------------------------
@@ -972,13 +988,15 @@ def _build_execution_config(
 # Name -> ID resolution helpers
 # ---------------------------------------------------------------------------
 
-def _pick_match(items: list, identifier: Any, id_key: str, name_key: str, label: str):
+def _pick_match(items: list, identifier: Any, id_key: str, name_key: str, label: str,
+                not_found_hint: Optional[str] = None):
     """
     Resolve identifier (numeric ID or name) against a pre-fetched list.
 
     Returns (id_int, error_dict). Numeric identifiers are returned as-is. Names are
     matched case-insensitively (exact first, then partial). Not-found / ambiguous
-    produce a standard error dict with the available options.
+    produce a standard error dict with the available options, or with not_found_hint when items
+    were already filtered by name and so list nothing useful.
     """
     s = str(identifier).strip()
     if s.isdigit():
@@ -988,15 +1006,20 @@ def _pick_match(items: list, identifier: Any, id_key: str, name_key: str, label:
     matches = exact if exact else [it for it in items if s.lower() in str(it.get(name_key, '')).strip().lower()]
 
     if not matches:
-        available = ', '.join(str(it.get(name_key)) for it in items[:20]) or '(none)'
+        if not_found_hint:
+            detail = not_found_hint
+        else:
+            detail = 'Available: ' + (', '.join(str(it.get(name_key)) for it in items[:20]) or '(none)')
         return None, {
             'status': 'failed',
             'error': f"{label.capitalize()} not found: '{s}'",
             'error_type': 'NotFound',
-            'message': f"No {label} matches '{s}'. Available: {available}"
+            'message': f"No {label} matches '{s}'. {detail}"
         }
     if len(matches) > 1:
-        listing = '\n'.join(f"  - ID: {m.get(id_key)}, Name: {m.get(name_key)}" for m in matches)
+        listing = '\n'.join(f"  - ID: {m.get(id_key)}, Name: {m.get(name_key)}" for m in matches[:20])
+        if len(matches) > 20:
+            listing += f"\n  ... and {len(matches) - 20} more"
         return None, {
             'status': 'failed',
             'error': f"Multiple {label}s match '{s}'",
@@ -1007,7 +1030,9 @@ def _pick_match(items: list, identifier: Any, id_key: str, name_key: str, label:
 
 
 def _fetch_error(label: str, resp: dict) -> dict:
-    """Standard error when a lookup list could not be fetched."""
+    """Standard error when a lookup list could not be fetched; an expired sign-in is passed on as it is."""
+    if isinstance(resp, dict) and resp.get('status') == 'api_key_required':
+        return resp
     return {
         'status': 'failed',
         'error': f"Failed to fetch {label} list",
@@ -1022,12 +1047,24 @@ async def _resolve_report(api_key: str, team_id: int, project_id: int, report: A
         return None, None
     if str(report).strip().isdigit():
         return int(report), None
-    resp = await make_api_request('GET', '/v1/sprints/list', api_key, params={
-        'team_id': team_id, 'project_id': project_id
-    })
-    if resp.get('status') != 'OK':
-        return None, _fetch_error('sprint/report', resp)
-    return _pick_match(resp.get('sprintsList', []), report, 'sprint_id', 'sprint_name', 'report')
+    if not str(report).strip():
+        return None, {'status': 'failed', 'error': 'report is empty', 'error_type': 'ValidationError',
+                      'message': 'Pass the sprint ID or its name.'}
+    # Let the backend filter by name; the unfiltered list is paged at 10.
+    found = await find_sprints_by_name(api_key, team_id, project_id, str(report).strip())
+    if found.get('status') != 'OK':
+        return None, _fetch_error('sprint/report', found)
+    if found['truncated']:
+        # The search stopped at its page limit, so a second sprint with this exact name can't be ruled out.
+        return None, {
+            'status': 'failed',
+            'error': 'Too many sprints match this name',
+            'error_type': 'Ambiguous',
+            'message': (f"Over {len(found['sprints'])} sprints have names containing '{str(report).strip()}'. "
+                        "Pass the sprint ID instead (bugasura_list_sprints shows the IDs)."),
+        }
+    return _pick_match(found['sprints'], report, 'sprint_id', 'sprint_name', 'report',
+                       not_found_hint='Use bugasura_list_sprints to see the sprint names, or pass the numeric id.')
 
 
 async def _resolve_environment(api_key: str, team_id: int, project_id: int, environment: Any):

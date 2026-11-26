@@ -5,7 +5,9 @@ from typing import List, Literal, Optional
 from fastmcp import Context
 from pydantic import Field
 
-from config.config import logger
+from config.config import (
+    logger, ISSUE_COMMENT_PICKER_PAGE_SIZE, ISSUE_PICKER_PAGE_SIZE, SPRINT_PICKER_PAGE_SIZE,
+)
 from core.app import mcp
 from utils.attachments import (
     ATTACH_FILE_PATHS_DESCRIPTION, ATTACH_UPLOAD_ID_DESCRIPTION, attachment_names_csv,
@@ -13,12 +15,64 @@ from utils.attachments import (
 )
 from utils.auth import get_api_key, validate_api_key
 from utils.client import make_api_request
-from utils.formatting import paginate_upstream, respond, filter_large_fields
+from utils.formatting import (
+    filter_large_fields, paginate_upstream, picker_offset_past_end, picker_paging, respond, upstream_failure,
+)
 from utils.output_types import ToolResponse
 from utils.resolvers import (
     IdOrName, find_user_ids_by_names_or_emails, resolve_issue_identifier_to_id, resolve_issue_ref,
     select_team_project_context,
 )
+
+ISSUE_START_AT_DESCRIPTION = (
+    f"Offset into the issue picker shown when issue_id is omitted; pass the picker's next_offset to see the next "
+    f"{ISSUE_PICKER_PAGE_SIZE} issues (default: 0)"
+)
+COMMENT_START_AT_DESCRIPTION = (
+    f"Offset into the comment picker shown when comment_id is omitted; pass the picker's next_offset to see the next "
+    f"{ISSUE_COMMENT_PICKER_PAGE_SIZE} comments (default: 0)"
+)
+
+
+async def _issue_picker(api_key: str, team_id, project_id, issue_start_at: int, message: str, instruction: str) -> dict:
+    """One page of the project's issues as a 'selection_required' menu, for tools called without issue_id."""
+    issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
+        'team_id': team_id,
+        'project_id': project_id,
+        'start_at': issue_start_at,
+        'max_results': ISSUE_PICKER_PAGE_SIZE,
+    })
+    if issues_response.get('status') != 'OK':
+        return upstream_failure(issues_response, 'Could not fetch issues for selection')
+
+    issues = issues_response.get('issue_list', [])[:ISSUE_PICKER_PAGE_SIZE]
+    # total_rows comes with an empty page too, so an empty project isn't reported as an offset past the end.
+    if not issues and issue_start_at and str(issues_response.get('total_rows', '')) != '0':
+        return picker_offset_past_end('issue_start_at', issue_start_at)
+    if not issues:
+        return {
+            'status': 'failed',
+            'error': 'No issues found in the selected project.',
+            'error_type': 'NotFound',
+            'suggestion': 'Please create an issue first using create_issue() tool.'
+        }
+
+    paging, more_hint = picker_paging(issue_start_at, len(issues), issues_response.get('total_rows'),
+                                      ISSUE_PICKER_PAGE_SIZE, 'issue_start_at')
+    return {
+        'status': 'selection_required',
+        'step': 'issue_selection',
+        'message': message,
+        **paging,
+        'options': [{
+            'issue_id': issue['issue_key'],
+            'issue_key': issue.get('issue_id', 'N/A'),
+            'summary': issue['summary'],
+            'status': issue.get('status', ''),
+            'severity': issue.get('severity', ''),
+        } for issue in issues],
+        'instruction': instruction.rstrip('.') + '.' + more_hint,
+    }
 
 
 @mcp.tool(
@@ -32,6 +86,7 @@ async def create_issue(
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    sprint_start_at: int = Field(default=0, ge=0, description=f"Offset into the sprint picker shown when sprint_id is omitted; pass the picker's next_offset to see the next {SPRINT_PICKER_PAGE_SIZE} sprints (default: 0)"),
     description: str = Field(default="", description="Detailed issue description (optional, supports HTML)"),
     severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"] = Field(default="MEDIUM", description="Severity: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW' (default: MEDIUM)"),
     status: str = Field(default="New", description="Status (default: New, must match project workflow)"),
@@ -62,6 +117,7 @@ async def create_issue(
         team_id: Team identifier (optional - will prompt if not provided)
         project_id: Project identifier (optional - will prompt if not provided)
         sprint_id: Sprint identifier (optional - will prompt if not provided)
+        sprint_start_at: Offset into the sprint picker; pass its next_offset for the next page
         description: Detailed description of the issue
         severity: CRITICAL/HIGH/MEDIUM/LOW (default: MEDIUM)
         status: Issue status (default: "New")
@@ -108,7 +164,9 @@ async def create_issue(
         # Call API directly instead of using the MCP tool function
         sprints_response = await make_api_request('GET', '/v1/sprints/list', api_key, params={
             'team_id': team_id,
-            'project_id': project_id
+            'project_id': project_id,
+            'start_at': sprint_start_at,
+            'max_results': SPRINT_PICKER_PAGE_SIZE,
         })
         # Handle case where API might return a list instead of dict
         if isinstance(sprints_response, list):
@@ -119,23 +177,30 @@ async def create_issue(
                 'response_preview': str(sprints_response[:2]) if len(sprints_response) > 0 else 'Empty list'
             }
         if sprints_response.get('status') != 'OK':
-            return sprints_response
+            return upstream_failure(sprints_response, 'Could not fetch sprints for selection')
 
-        sprints = sprints_response.get('sprintsList', [])
+        sprints = sprints_response.get('sprintsList', [])[:SPRINT_PICKER_PAGE_SIZE]
+        if not sprints and sprint_start_at:
+            return picker_offset_past_end('sprint_start_at', sprint_start_at)
         if not sprints:
             return {
                 'status': 'failed',
                 'error': 'No sprints found in the selected project. Please create a sprint first.',
+                'error_type': 'NotFound',
                 'suggestion': 'You can create a sprint using create_sprint() tool.'
             }
 
         # Filter active/in-progress sprints first for better UX
         active_sprints = [s for s in sprints if s.get('sprint_status') == 'IN PROGRESS']
 
+        paging, more_hint = picker_paging(sprint_start_at, len(sprints), sprints_response.get('total_rows'),
+                                          SPRINT_PICKER_PAGE_SIZE, 'sprint_start_at')
+
         return {
             'status': 'selection_required',
             'step': 'sprint_selection',
             'message': 'Please select a sprint to create the issue in:',
+            **paging,
             'options': [{
                 'sprint_id': sprint['sprint_id'],
                 'sprint_name': sprint['sprint_name'],
@@ -147,7 +212,7 @@ async def create_issue(
                 'sprint_id': sprint['sprint_id'],
                 'sprint_name': sprint['sprint_name']
             } for sprint in active_sprints] if active_sprints else None,
-            'instruction': f'Please call bugasura_create_issue again with sprint_id parameter. Example: bugasura_create_issue(team_id={team_id}, project_id={project_id}, sprint_id=<selected_sprint_id>, summary="{summary}")'
+            'instruction': f'Please call bugasura_create_issue again with sprint_id parameter. Example: bugasura_create_issue(team_id={team_id}, project_id={project_id}, sprint_id=<selected_sprint_id>, summary="{summary}").{more_hint}'
         }
 
     # All context parameters provided - proceed with issue creation
@@ -155,21 +220,33 @@ async def create_issue(
     # IMPORTANT: Validate that the sprint exists and belongs to this project
     # The backend will fail with "Error getting testplan report" if sprint_id is invalid
     logger.info(f"create_issue: Validating sprint_id={sprint_id} for project_id={project_id}")
+    # Filter by sprint_id upstream; the unfiltered list is paged at 10 and hid every later sprint.
     sprint_validation = await make_api_request('GET', '/v1/sprints/list', api_key, params={
         'team_id': str(team_id),
-        'project_id': str(project_id)
+        'project_id': str(project_id),
+        'sprint_id': str(sprint_id),
     })
 
     if sprint_validation.get('status') == 'OK':
         sprints = sprint_validation.get('sprintsList', [])
-        # Check if the provided sprint_id exists in this project
-        sprint_ids = [s.get('sprint_id') for s in sprints]
-        if sprint_id not in sprint_ids:
+        # Asked by id the API also returns trashed and archived sprints; is_deleted/is_archived come with newer API builds.
+        sprint_row = next((s for s in sprints if str(s.get('sprint_id')) == str(sprint_id)
+                           and str(s.get('is_deleted') or 0) == '0'), None)
+        if not sprint_row:
             return {
                 'status': 'failed',
                 'error': 'Invalid sprint_id',
-                'message': f"Sprint ID {sprint_id} does not exist in project {project_id}. Available sprint IDs: {sprint_ids[:10]}",
-                'suggestion': 'Please verify the sprint_id belongs to the selected project.'
+                'error_type': 'NotFound',
+                'message': f"Sprint ID {sprint_id} does not exist in project {project_id}, or it is in Trash.",
+                'suggestion': 'Call bugasura_list_sprints to see the project\'s sprints.'
+            }
+        if str(sprint_row.get('is_archived') or 0) != '0':
+            return {
+                'status': 'failed',
+                'error': 'Sprint is archived',
+                'error_type': 'ValidationError',
+                'message': f"Sprint {sprint_id} is archived. Unarchive it in the web app, or pick another sprint.",
+                'suggestion': 'Call bugasura_create_issue without sprint_id to pick from the sprints that are not archived.'
             }
         logger.info(f"create_issue: Sprint validation passed. Sprint {sprint_id} exists in project {project_id}")
     else:
@@ -859,6 +936,7 @@ async def list_issues(
 )
 async def list_issue_comments(
     issue_id: Optional[IdOrName] = Field(default=None, description="Issue id or key, e.g. 107294 or 'JUS3' (optional - will prompt if not provided)"),
+    issue_start_at: int = Field(default=0, ge=0, description=ISSUE_START_AT_DESCRIPTION),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     creator_id: Optional[int] = Field(default=None, description="Filter by comment author ID (optional)"),
@@ -944,41 +1022,10 @@ async def list_issue_comments(
     # Step 3: If issue_id not provided, fetch and return issue options
     if issue_id is None:
         logger.info(f"list_issue_comments: No issue_id provided, fetching issues for project_id={project_id}")
-
-        # Fetch issues for the selected project
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
-            'team_id': team_id,
-            'project_id': project_id,
-            'start_at': 0,
-            'max_results': 50  # Get enough issues for selection
-        })
-
-        if issues_response.get('status') != 'OK':
-            return respond(issues_response, response_format)
-
-        issues = issues_response.get('issue_list', [])
-
-        if not issues:
-            return respond({
-                'status': 'failed',
-                'error': 'No issues found in the selected project.',
-                'suggestion': 'Please create an issue first using create_issue() tool.'
-            }, response_format)
-
-        return respond({
-            'status': 'selection_required',
-            'step': 'issue_selection',
-            'message': 'Please select an issue to view comments:',
-            'options': [{
-                'issue_id': issue['issue_key'],
-                'issue_key': issue.get('issue_id', 'N/A'),
-                'summary': issue['summary'],
-                'status': issue.get('bug_status', ''),
-                'severity': issue.get('severity', ''),
-                'assignees': issue.get('assignees', '')
-            } for issue in issues[:20]],  # Show top 20 issues
-            'instruction': f'Please call bugasura_list_issue_comments again with issue_id parameter. Example: bugasura_list_issue_comments(team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
-        }, response_format)
+        return respond(await _issue_picker(api_key, team_id, project_id, issue_start_at,
+            'Please select an issue to view comments:',
+            f'Please call bugasura_list_issue_comments again with issue_id parameter. Example: bugasura_list_issue_comments(team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)',
+        ), response_format)
 
     # All context parameters provided - proceed with fetching comments
     logger.info(f"list_issue_comments: Fetching comments for issue_id={issue_id}, team_id={team_id}, project_id={project_id}")
@@ -1024,6 +1071,7 @@ async def list_issue_comments(
 async def get_issue_comment(
     comment_id: Optional[int] = Field(default=None, description="Comment numeric ID (optional - will prompt if not provided, ge=1)", ge=1),
     issue_id: Optional[IdOrName] = Field(default=None, description="Issue id or key, e.g. 107294 or 'JUS3' (optional - will prompt if not provided)"),
+    issue_start_at: int = Field(default=0, ge=0, description=ISSUE_START_AT_DESCRIPTION),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
@@ -1087,42 +1135,10 @@ async def get_issue_comment(
     # Step 3: If issue_id not provided, fetch and return issue options
     if issue_id is None:
         logger.info(f"get_issue_comment: No issue_id provided, fetching issues for project_id={project_id}")
-
-        # Fetch issues for the selected project
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
-            'team_id': team_id,
-            'project_id': project_id,
-            'start_at': 0,
-            'max_results': 50  # Get enough issues for selection
-        })
-
-        if issues_response.get('status') != 'OK':
-            return respond(issues_response, response_format)
-
-        issues = issues_response.get('issue_list', [])
-
-
-        if not issues:
-            return respond({
-                'status': 'failed',
-                'error': 'No issues found in the selected project.',
-                'suggestion': 'Please create an issue first using create_issue() tool.'
-            }, response_format)
-
-        return respond({
-            'status': 'selection_required',
-            'step': 'issue_selection',
-            'message': f'Please select an issue to get comment {comment_id} from:',
-            'options': [{
-                'issue_id': issue['issue_key'],
-                'issue_key': issue.get('issue_id', 'N/A'),
-                'summary': issue['summary'],
-                'status': issue.get('bug_status', ''),
-                'severity': issue.get('severity', ''),
-                'assignees': issue.get('assignees', '')
-            } for issue in issues[:20]],  # Show top 20 issues
-            'instruction': f'Please call bugasura_get_issue_comment again with issue_id parameter. Example: bugasura_get_issue_comment(comment_id={comment_id}, team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
-        }, response_format)
+        return respond(await _issue_picker(api_key, team_id, project_id, issue_start_at,
+            f'Please select an issue to get comment {comment_id} from:',
+            f'Please call bugasura_get_issue_comment again with issue_id parameter. Example: bugasura_get_issue_comment(comment_id={comment_id}, team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)',
+        ), response_format)
 
     # All context parameters provided - proceed with fetching comment
     logger.info(f"get_issue_comment: Fetching comment_id={comment_id} for issue_id={issue_id}, team_id={team_id}, project_id={project_id}")
@@ -1156,6 +1172,7 @@ async def get_issue_comment(
 async def add_issue_comment(
     comment: str = Field(description="Comment text content (required, 1-65535 characters, supports HTML, min_length=1)"),
     issue_id: Optional[IdOrName] = Field(default=None, description="Issue id or key, e.g. 107294 or 'JUS3' (optional - will prompt if not provided)"),
+    issue_start_at: int = Field(default=0, ge=0, description=ISSUE_START_AT_DESCRIPTION),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     is_public_comment: int = Field(default=1, description="Comment visibility: 1 for public (default), 0 for private"),
@@ -1309,42 +1326,10 @@ async def add_issue_comment(
     # Step 3: If issue_id not provided, fetch and return issue options
     if issue_id is None:
         logger.info(f"add_issue_comment: No issue_id provided, fetching issues for project_id={project_id}")
-
-        # Fetch issues for the selected project
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
-            'team_id': team_id,
-            'project_id': project_id,
-            'start_at': 0,
-            'max_results': 50  # Get enough issues for selection
-        })
-
-        if issues_response.get('status') != 'OK':
-            return issues_response
-
-        issues = issues_response.get('issue_list', [])
-        if not issues:
-            return {
-                'status': 'failed',
-                'error': 'No issues found in the selected project',
-                'suggestion': 'Please create an issue first using create_issue() tool.'
-            }
-
-        # Return issue selection prompt with preview of comment
-        return {
-            'status': 'selection_required',
-            'step': 'issue_selection',
-            'message': f'Please select an issue to add this comment: "{comment[:100]}..."',
-            'options': [{
-                'issue_id': issue['issue_key'],
-                'issue_key': issue.get('issue_id', 'N/A'),
-                'summary': issue['summary'],
-                'status': issue.get('bug_status', ''),
-                'severity': issue.get('severity', ''),
-                'assignees': issue.get('assignees', ''),
-                'comment_count': issue.get('comments_count', 0)
-            } for issue in issues[:20]],  # Show top 20 issues
-            'instruction': f'Please call bugasura_add_issue_comment again with issue_id parameter. Example: bugasura_add_issue_comment(comment="{comment[:30]}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
-        }
+        return await _issue_picker(api_key, team_id, project_id, issue_start_at,
+            f'Please select an issue to add this comment: "{comment[:100]}..."',
+            f'Please call bugasura_add_issue_comment again with issue_id parameter. Example: bugasura_add_issue_comment(comment="{comment[:30]}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)',
+        )
 
     # All context parameters provided - proceed with adding comment
     logger.info(f"add_issue_comment: Adding comment to issue_id={issue_id}, team_id={team_id}, project_id={project_id}")
@@ -1407,7 +1392,9 @@ async def add_issue_comment(
 async def update_issue_comment(
     comment: str = Field(default="", description="Updated comment text (required when comment_id provided, 1-65535 characters, supports HTML, min_length=1)"),
     comment_id: Optional[int] = Field(default=None, description="Comment numeric ID to update (optional - will prompt if not provided, ge=1)", ge=1),
+    comment_start_at: int = Field(default=0, ge=0, description=COMMENT_START_AT_DESCRIPTION),
     issue_id: Optional[IdOrName] = Field(default=None, description="Issue id or key, e.g. 107294 or 'JUS3' (optional - will prompt if not provided)"),
+    issue_start_at: int = Field(default=0, ge=0, description=ISSUE_START_AT_DESCRIPTION),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
     comment_attachment_names: str = Field(default="", description="Comma-separated attachment filenames (optional, preserves existing if empty)"),
@@ -1498,60 +1485,37 @@ async def update_issue_comment(
     # Step 3: If issue_id not provided, fetch and return issue options
     if issue_id is None:
         logger.info(f"update_issue_comment: No issue_id provided, fetching issues for project_id={project_id}")
-
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
-            'team_id': team_id,
-            'project_id': project_id,
-            'start_at': 0,
-            'max_results': 50
-        })
-
-        if issues_response.get('status') != 'OK':
-            return issues_response
-
-        issues = issues_response.get('issue_list', [])
-        if not issues:
-            return {
-                'status': 'failed',
-                'error': 'No issues found in the selected project',
-                'suggestion': 'Please create an issue first using create_issue() tool.'
-            }
-
-        # Return issue selection prompt
-        return {
-            'status': 'selection_required',
-            'step': 'issue_selection',
-            'message': 'Please select an issue to update comment in:',
-            'options': [{
-                'issue_id': issue['issue_key'],
-                'issue_key': issue.get('issue_id', 'N/A'),
-                'summary': issue['summary'],
-                'status': issue.get('bug_status', ''),
-                'comment_count': issue.get('comments_count', 0)
-            } for issue in issues[:20]],
-            'instruction': f'Please call bugasura_update_issue_comment again with issue_id parameter. Example: bugasura_update_issue_comment(comment="{comment[:30] if comment else ""}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
-        }
+        return await _issue_picker(api_key, team_id, project_id, issue_start_at,
+            'Please select an issue to update comment in:',
+            f'Please call bugasura_update_issue_comment again with issue_id parameter. Example: bugasura_update_issue_comment(comment="{comment[:30] if comment else ""}...", team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)',
+        )
 
     # Step 4: NEW - If comment_id not provided, fetch and return comment options
     if comment_id is None:
         logger.info(f"update_issue_comment: No comment_id provided, fetching comments for issue_id={issue_id}")
 
-        # Fetch all comments for the selected issue
+        # One page of the issue's user comments; system comments are dropped upstream so pages match the menu.
         comments_response = await make_api_request('GET', '/v1/issues/comments/list', api_key, params={
             'team_id': team_id,
             'project_id': project_id,
             'issue_key': issue_id,
-            'is_list': 'true'
+            'is_list': 'true',
+            'get_user_comments_only': 1,
+            'start_at': comment_start_at,
+            'max_results': ISSUE_COMMENT_PICKER_PAGE_SIZE,
         })
 
         if comments_response.get('status') != 'OK':
-            return comments_response
+            return upstream_failure(comments_response, 'Could not fetch the issue comments')
 
-        comments = comments_response.get('comment_list', [])
+        comments = comments_response.get('comment_list', [])[:ISSUE_COMMENT_PICKER_PAGE_SIZE]
+        if not comments and comment_start_at:
+            return picker_offset_past_end('comment_start_at', comment_start_at)
         if not comments:
             return {
                 'status': 'failed',
                 'error': 'No comments found on this issue',
+                'error_type': 'NotFound',
                 'message': 'This issue has no comments to update. Please add a comment first.',
                 'suggestion': 'Use bugasura_add_issue_comment() to add a comment first.',
                 'issue_id': issue_id,
@@ -1567,11 +1531,18 @@ async def update_issue_comment(
             if not c.get('is_system_comment', 0) and not c.get('is_deleted', 0)
         ]
 
-        if not editable_comments:
+        paging, more_hint = picker_paging(comment_start_at, len(comments), comments_response.get('total_rows'),
+                                          ISSUE_COMMENT_PICKER_PAGE_SIZE, 'comment_start_at',
+                                          shown=len(editable_comments))
+
+        if not editable_comments and not paging['has_more']:
             return {
                 'status': 'failed',
                 'error': 'No editable comments found',
-                'message': 'All comments on this issue are either system comments or deleted.',
+                'error_type': 'NotFound',
+                'message': (f'No editable comments from comment_start_at={comment_start_at} on; call again with a smaller '
+                            'comment_start_at to see the earlier ones.' if comment_start_at else
+                            'All comments on this issue are either system comments or deleted.'),
                 'total_comments': len(comments),
                 'system_comments': len([c for c in comments if c.get('is_system_comment')]),
                 'deleted_comments': len([c for c in comments if c.get('is_deleted')]),
@@ -1583,6 +1554,7 @@ async def update_issue_comment(
             'status': 'selection_required',
             'step': 'comment_selection',
             'message': f'Please select a comment to update (showing {len(editable_comments)} editable comments):',
+            **paging,
             'options': [{
                 'comment_id': comment['comment_id'],
                 'comment_preview': (
@@ -1590,15 +1562,12 @@ async def update_issue_comment(
                     if len(comment.get('plain_text_comment', comment.get('comment', ''))) > 100 
                     else comment.get('plain_text_comment', comment.get('comment', ''))
                 ),
-                'author': comment.get('user_name', 'Unknown'),
-                'author_email': comment.get('user_email', ''),
+                'author': comment.get('author') or 'Unknown',
                 'created_at': comment.get('created_date', ''),
                 'last_modified': comment.get('last_modified', ''),
                 'is_editable': True,
-                'attachments_count': len(comment.get('comment_attachments_files', []))
-            } for comment in editable_comments[:20]],
-            'total_editable_comments': len(editable_comments),
-            'instruction': f'Please call bugasura_update_issue_comment again with comment_id parameter. Example: bugasura_update_issue_comment(comment="Your updated text here", comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id})'
+            } for comment in editable_comments],
+            'instruction': f'Please call bugasura_update_issue_comment again with comment_id parameter. Example: bugasura_update_issue_comment(comment="Your updated text here", comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id}).{more_hint}'
         }
 
     # Step 5: All context parameters provided - validate comment text and proceed
@@ -1679,7 +1648,9 @@ async def update_issue_comment(
 )
 async def delete_issue_comment(
     comment_id: Optional[int] = Field(default=None, description="Comment numeric ID to delete (optional - will prompt if not provided, ge=1)", ge=1),
+    comment_start_at: int = Field(default=0, ge=0, description=COMMENT_START_AT_DESCRIPTION),
     issue_id: Optional[IdOrName] = Field(default=None, description="Issue id or key, e.g. 107294 or 'JUS3' (optional - will prompt if not provided)"),
+    issue_start_at: int = Field(default=0, ge=0, description=ISSUE_START_AT_DESCRIPTION),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
 ) -> ToolResponse:
@@ -1761,60 +1732,37 @@ async def delete_issue_comment(
     # Step 3: If issue_id not provided, fetch and return issue options
     if issue_id is None:
         logger.info(f"delete_issue_comment: No issue_id provided, fetching issues for project_id={project_id}")
-
-        issues_response = await make_api_request('GET', '/v1/issues/list', api_key, params={
-            'team_id': team_id,
-            'project_id': project_id,
-            'start_at': 0,
-            'max_results': 50
-        })
-
-        if issues_response.get('status') != 'OK':
-            return issues_response
-
-        issues = issues_response.get('issue_list', [])
-        if not issues:
-            return {
-                'status': 'failed',
-                'error': 'No issues found in the selected project',
-                'suggestion': 'Please create an issue first using create_issue() tool.'
-            }
-
-        # Return issue selection prompt
-        return {
-            'status': 'selection_required',
-            'step': 'issue_selection',
-            'message': 'Please select an issue to delete comment from:',
-            'options': [{
-                'issue_id': issue['issue_key'],
-                'issue_key': issue.get('issue_id', 'N/A'),
-                'summary': issue['summary'],
-                'status': issue.get('bug_status', ''),
-                'comment_count': issue.get('comments_count', 0)
-            } for issue in issues[:20]],
-            'instruction': f'Please call bugasura_delete_issue_comment again with issue_id parameter. Example: bugasura_delete_issue_comment(team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)'
-        }
+        return await _issue_picker(api_key, team_id, project_id, issue_start_at,
+            'Please select an issue to delete comment from:',
+            f'Please call bugasura_delete_issue_comment again with issue_id parameter. Example: bugasura_delete_issue_comment(team_id={team_id}, project_id={project_id}, issue_id=<selected_issue_id>)',
+        )
 
     # Step 4: NEW - If comment_id not provided, fetch and return comment options
     if comment_id is None:
         logger.info(f"delete_issue_comment: No comment_id provided, fetching comments for issue_id={issue_id}")
 
-        # Fetch all comments for the selected issue
+        # One page of the issue's user comments; system comments are dropped upstream so pages match the menu.
         comments_response = await make_api_request('GET', '/v1/issues/comments/list', api_key, params={
             'team_id': team_id,
             'project_id': project_id,
             'issue_key': issue_id,
-            'is_list': 'true'
+            'is_list': 'true',
+            'get_user_comments_only': 1,
+            'start_at': comment_start_at,
+            'max_results': ISSUE_COMMENT_PICKER_PAGE_SIZE,
         })
 
         if comments_response.get('status') != 'OK':
-            return comments_response
+            return upstream_failure(comments_response, 'Could not fetch the issue comments')
 
-        comments = comments_response.get('comment_list', [])
+        comments = comments_response.get('comment_list', [])[:ISSUE_COMMENT_PICKER_PAGE_SIZE]
+        if not comments and comment_start_at:
+            return picker_offset_past_end('comment_start_at', comment_start_at)
         if not comments:
             return {
                 'status': 'failed',
                 'error': 'No comments found on this issue',
+                'error_type': 'NotFound',
                 'message': 'This issue has no comments to delete.',
                 'suggestion': 'Please select a different issue or add comments first.',
                 'issue_id': issue_id,
@@ -1830,11 +1778,18 @@ async def delete_issue_comment(
             if not c.get('is_system_comment', 0) and not c.get('is_deleted', 0)
         ]
 
-        if not deletable_comments:
+        paging, more_hint = picker_paging(comment_start_at, len(comments), comments_response.get('total_rows'),
+                                          ISSUE_COMMENT_PICKER_PAGE_SIZE, 'comment_start_at',
+                                          shown=len(deletable_comments))
+
+        if not deletable_comments and not paging['has_more']:
             return {
                 'status': 'failed',
                 'error': 'No deletable comments found',
-                'message': 'All comments on this issue are either system comments or already deleted.',
+                'error_type': 'NotFound',
+                'message': (f'No deletable comments from comment_start_at={comment_start_at} on; call again with a smaller '
+                            'comment_start_at to see the earlier ones.' if comment_start_at else
+                            'All comments on this issue are either system comments or already deleted.'),
                 'total_comments': len(comments),
                 'system_comments': len([c for c in comments if c.get('is_system_comment')]),
                 'deleted_comments': len([c for c in comments if c.get('is_deleted')]),
@@ -1854,6 +1809,7 @@ async def delete_issue_comment(
                 'Email notifications will be sent to assignees/admins',
                 'This action cannot be reversed'
             ],
+            **paging,
             'options': [{
                 'comment_id': comment['comment_id'],
                 'comment_preview': (
@@ -1861,15 +1817,12 @@ async def delete_issue_comment(
                     if len(comment.get('plain_text_comment', comment.get('comment', ''))) > 100 
                     else comment.get('plain_text_comment', comment.get('comment', ''))
                 ),
-                'author': comment.get('user_name', 'Unknown'),
-                'author_email': comment.get('user_email', ''),
+                'author': comment.get('author') or 'Unknown',
                 'created_at': comment.get('created_date', ''),
                 'last_modified': comment.get('last_modified', ''),
                 'is_deletable': True,
-                'attachments_count': len(comment.get('comment_attachments_files', []))
-            } for comment in deletable_comments[:20]],
-            'total_deletable_comments': len(deletable_comments),
-            'instruction': f'To proceed with PERMANENT deletion, call: bugasura_delete_issue_comment(comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id})'
+            } for comment in deletable_comments],
+            'instruction': f'To proceed with PERMANENT deletion, call: bugasura_delete_issue_comment(comment_id=<selected_comment_id>, issue_id={issue_id}, team_id={team_id}, project_id={project_id}).{more_hint}'
         }
 
     # Step 5: All context parameters provided - proceed with deleting comment

@@ -1480,6 +1480,8 @@ async def delete_test_data_file(
 async def list_test_data_categories(
     team_id: IdOrName = Field(description="Team id or name (required)"),
     project_id: int = Field(description="Project identifier (required)", ge=1),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
     response_format: Literal["json", "markdown"] = Field(default="json", description="Output format: 'json' (structured dict) or 'markdown' (human-readable text)"),
 ) -> ToolResponse:
     """
@@ -1507,7 +1509,8 @@ async def list_test_data_categories(
     if error:
         return respond(error, response_format)
     return respond(paginate_upstream({'status': 'OK', 'categories': _all_categories(custom_categories)},
-                                     items_key='categories', local=True), response_format)
+                                     items_key='categories', offset=start_at, max_results=max_results,
+                                     local=True), response_format)
 
 
 @mcp.tool(

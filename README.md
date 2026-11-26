@@ -1171,7 +1171,7 @@ MCP resources provide read-only access to your Bugasura data. AI assistants can 
 
 ### Pagination
 
-List operations return 10 results by default:
+List tools take `start_at` and `max_results` and answer with `total`, `has_more` and `next_offset`. The default page size depends on the tool (10 to 50), up to 100:
 
 ```
 Show me the first 20 issues (using max_results=20)
@@ -1187,6 +1187,19 @@ Show me the first 50 comments on issue 123 (using max_results=50)
 
 ```
 Show me comments 21-40 on issue 456 (using start_at=20, max_results=20)
+```
+
+When a tool is called without an id it may answer with a menu to pick from (`status: selection_required`). Long menus page too: the reply carries the same `has_more` and `next_offset`, and a `*_start_at` argument shows the next page:
+
+| Menu | Tools | Next page with |
+|---|---|---|
+| Sprints (50 per page) | `bugasura_create_issue` | `sprint_start_at` |
+| Issues (20 per page) | the issue comment tools | `issue_start_at` |
+| Comments (20 per page) | `bugasura_update_issue_comment`, `bugasura_delete_issue_comment`, and the same test case comment tools | `comment_start_at` |
+| Test cases (25 per page) | the test case comment tools | `test_case_start_at` |
+
+```
+Create an issue for the login bug (the assistant shows the first 50 sprints; "show more" fetches the rest)
 ```
 
 ### Partial Updates

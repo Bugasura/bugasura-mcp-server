@@ -28,6 +28,7 @@ from utils.attachments import close_upload_files
 from utils.auth import get_api_key, validate_api_key, current_user_id
 from utils.client import UPLOAD_TIMEOUT, in_http_request, make_api_request
 from utils.files import local_path_rejected
+from utils.formatting import paginated, upstream_failure
 from utils.output_types import ToolResponse
 from utils.resolvers import IdOrName, select_team_project_context
 from utils.urls import download_url_tmp, infer_filename_from_url_path, normalise_share_url
@@ -3624,6 +3625,8 @@ async def list_testpert_kb(
     sprint_id: Optional[int] = Field(default=None, description="Sprint identifier (= report_id). Required (prompts if omitted, ge=1).", ge=1),
     team_id: Optional[IdOrName] = Field(default=None, description="Team id or name (optional - will prompt if not provided)"),
     project_id: Optional[int] = Field(default=None, description="Project identifier (optional - will prompt if not provided, ge=1)", ge=1),
+    start_at: int = Field(default=0, ge=0, description="Pagination offset (default: 0)"),
+    max_results: int = Field(default=50, ge=1, le=100, description="Number of results to return (default: 50, max 100)"),
 ) -> ToolResponse:
     """List knowledge-base items via /v1/testpertKB/sprint/get."""
     api_key = get_api_key()
@@ -3639,17 +3642,21 @@ async def list_testpert_kb(
     resp = await make_api_request('GET', '/v1/testpertKB/sprint/get', api_key, params={
         'appId': context['project_id'], 'teamId': context['team_id'], 'sprintId': sprint_id,
     })
-    items = _parse_kb_items(resp.get('kbDetails') if isinstance(resp, dict) else None)
-    return {
-        'status': 'OK',
-        'sprint_id': sprint_id,
-        'documents': items,
-        'count': len(items),
-        'message': (f"{len(items)} document(s) in the knowledge base." if items
-                    else "No documents in the knowledge base yet."),
-        'next_step': ("Show the user the documents (filename) and let them remove any with "
-                      "bugasura_testpert_delete_kb (pass its id). Use plain language; don't show codes."),
-    }
+    if not isinstance(resp, dict) or resp.get('status') != 'OK':
+        return upstream_failure(resp if isinstance(resp, dict) else {}, 'Could not fetch the knowledge base documents')
+    items = _parse_kb_items(resp.get('kbDetails'))
+    # The endpoint returns every document, so page here.
+    page = items[start_at:start_at + max_results]
+    return paginated(
+        page, total=len(items), offset=start_at, max_results=max_results,
+        sprint_id=sprint_id,
+        documents=page,
+        message=(f"{len(items)} document(s) in the knowledge base." if items
+                 else "No documents in the knowledge base yet."),
+        next_step=("Show the user the documents (filename) and let them remove any with "
+                   "bugasura_testpert_delete_kb (pass its id). Use plain language; don't show codes."
+                   + (" More documents exist: call again with start_at=next_offset." if start_at + len(page) < len(items) else "")),
+    )
 
 
 @mcp.tool(
@@ -4774,7 +4781,8 @@ def _parse_kb_items(kb_details: Any) -> list:
     """Flatten the testpertKB rows into a friendly list for display/deletion."""
     out = []
     for r in kb_details or []:
-        if not isinstance(r, dict):
+        # With no documents the API sends the DB layer's [{NROWS: 0, STATUS: 'OK'}] row.
+        if not isinstance(r, dict) or not r.get('kb_id'):
             continue
         filename = None
         conn = r.get('connection_details')

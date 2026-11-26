@@ -215,7 +215,8 @@ def get_pagination_docs() -> str:
             "has_more":    "bool — true if total > offset + count",
             "next_offset": "int|null — start_at value for the next page, or null if exhausted"
         },
-        "current_state": "Paginated list_* tools return this envelope. list_teams and the TestPert getters return their full result in one response.",
+        "current_state": "Paginated list_* tools (and bugasura_testpert_list_kb) return this envelope. The other TestPert getters return their full result in one response.",
+        "selection_menus": "A tool called without an id may answer status 'selection_required' with options to pick from. A long menu carries total (null when the API does not report it), has_more and next_offset; call the same tool again with the same arguments plus its *_start_at argument (sprint_start_at, issue_start_at, comment_start_at or test_case_start_at) set to next_offset for the next page.",
         "client_guidance": "Always pass start_at + max_results explicitly. Do not assume the upstream cap is your cap."
     }, indent=2)
 
